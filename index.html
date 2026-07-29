@@ -25,7 +25,7 @@
   <div class="game-layout" id="gameLayout">
 
     <section class="board-area">
-      <div class="hand hand-gote" id="handGote" aria-label="後手の持ち駒"></div>
+      <div class="hand hand-gote" id="handGote" aria-label="相手の持ち駒"></div>
 
       <div class="board-frame">
         <div class="file-labels" id="fileLabels"></div>
@@ -35,7 +35,7 @@
         </div>
       </div>
 
-      <div class="hand hand-sente" id="handSente" aria-label="先手（あなた）の持ち駒"></div>
+      <div class="hand hand-sente" id="handSente" aria-label="あなたの持ち駒"></div>
 
       <p class="status" id="status">対局を始めましょう。</p>
 
@@ -44,8 +44,20 @@
           <label>手合割
             <select id="handicapSel"></select>
           </label>
+          <label>あなたの手番
+            <select id="sideSel">
+              <option value="0">先手（先に指す）</option>
+              <option value="1">後手（後に指す）</option>
+            </select>
+          </label>
           <label>相手の強さ
             <select id="levelSel"></select>
+          </label>
+          <label>対局相手
+            <select id="oppSel">
+              <option value="engine">内蔵エンジン</option>
+              <option value="external">外部AI（Claude / Cursor / ChatGPT）</option>
+            </select>
           </label>
           <button type="button" class="btn primary" id="newGameBtn">新規対局</button>
         </div>
@@ -55,6 +67,11 @@
           <button type="button" class="btn" id="mateBtn">詰みチェック</button>
           <button type="button" class="btn" id="askBtn">Claudeに聞く</button>
           <button type="button" class="btn danger" id="resignBtn">投了</button>
+        </div>
+        <div class="control-row external-row hidden" id="externalRow">
+          <input type="text" id="comMoveInput" placeholder="相手の手（例: 7g7f / ▲7六歩 / 77-76）" spellcheck="false" autocomplete="off">
+          <button type="button" class="btn primary" id="comMoveBtn">この手で指す</button>
+          <span class="ext-state" id="extState"></span>
         </div>
         <div class="control-row">
           <button type="button" class="btn" id="shareBtn">チャットに貼る</button>

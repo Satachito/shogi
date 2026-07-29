@@ -24,7 +24,39 @@ const path = require('path');
 const PORT = Number(process.env.SHOGI_PORT || 8765);
 const ROOT = __dirname;
 const OUT_PATH = path.join(ROOT, 'current-position.txt');
+const MOVE_PATH = path.join(ROOT, 'com-move.txt');
 const MAX_BODY = 64 * 1024;          // 局面テキストは数KBなので十分
+
+/*
+ * 相手（COM）側の指し手を受け取る仕組み。
+ * 外部のAI（Claude Code / Cursor / ChatGPT など）は次のどちらでも指せる：
+ *   1. com-move.txt に指し手を1行書く   ← ファイルが触れるツール向け
+ *   2. POST /move に指し手を送る        ← HTTPが叩けるツール向け
+ * アプリは GET /move?since=N で新しい手が来ていないか見に行く。
+ */
+let moveState = { seq: 0, move: '', at: null, source: '' };
+let fileStamp = null;
+
+function stampOf(target) {
+  try { const st = fs.statSync(target); return st.mtimeMs + ':' + st.size; }
+  catch (e) { return null; }
+}
+
+function submitMove(text, source) {
+  const lines = String(text).split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  if (!lines.length) return false;
+  moveState = { seq: moveState.seq + 1, move: lines[0], at: timestamp(), source: source };
+  console.log('  指し手を受け取り  ' + lines[0] + '   (' + source + ')');
+  return true;
+}
+
+/** com-move.txt が書き換わっていたら取り込む */
+function pickUpMoveFile() {
+  const st = stampOf(MOVE_PATH);
+  if (st === null || st === fileStamp) return;
+  fileStamp = st;
+  try { submitMove(fs.readFileSync(MOVE_PATH, 'utf8'), 'com-move.txt'); } catch (e) {}
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -147,6 +179,40 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // アプリが「新しい指し手が来ていないか」を見に来る
+  if (req.method === 'GET' && route === '/move') {
+    pickUpMoveFile();
+    const qs = req.url.split('?')[1] || '';
+    const m = /(?:^|&)since=(\d+)/.exec(qs);
+    const since = m ? Number(m[1]) : 0;
+    const fresh = moveState.seq > since;
+    const body = JSON.stringify({
+      seq: moveState.seq,
+      move: fresh ? moveState.move : null,
+      at: fresh ? moveState.at : null,
+      source: fresh ? moveState.source : null
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(body);
+    return;
+  }
+
+  // 外部AIが指し手を送ってくる
+  if (req.method === 'POST' && route === '/move') {
+    readBody(req, MAX_BODY).then((text) => {
+      if (submitMove(text, 'POST /move')) {
+        fileStamp = stampOf(MOVE_PATH);   // ファイル側と二重に拾わないようにする
+        sendText(res, 200, 'ok');
+      } else {
+        sendText(res, 400, 'empty');
+      }
+    }).catch((e) => {
+      if (res.headersSent) return;
+      sendText(res, e && e.tooLarge ? 413 : 400, 'bad body');
+    });
+    return;
+  }
+
   if (req.method === 'POST') {
     if (route !== '/position') { sendText(res, 404, 'not found'); return; }
     readBody(req, MAX_BODY).then((text) => {
@@ -185,8 +251,10 @@ server.on('error', (e) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
+  fileStamp = stampOf(MOVE_PATH);   // 起動前に残っていた手は指さない
   console.log('将棋アプリを開いてください  →  http://localhost:' + PORT + '/');
   console.log('局面の書き出し先            →  ' + OUT_PATH);
+  console.log('相手の指し手の受け口        →  com-move.txt  /  POST /move');
   console.log('止めるときは Ctrl-C');
 });
 

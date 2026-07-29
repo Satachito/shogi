@@ -47,36 +47,47 @@
 
   // ------------------------------------------------------------ 盤の表示
   function BoardView(root, onClick) {
+    var self = this;
     this.root = root;
     this.cells = [];
     this.stars = {};
+    this.flip = false;          // true なら盤を180度回して表示（後手を持つとき）
     clear(root);
-    for (var sq = 0; sq < 81; sq++) {
+    for (var i = 0; i < 81; i++) {
       var d = el('div', 'sq');
-      d.dataset.sq = sq;
-      var r = S.rowOf(sq), c = S.colOf(sq);
-      if ((r === 2 || r === 5) && (c === 2 || c === 5)) { d.classList.add('star'); this.stars[sq] = 1; }
+      d.dataset.idx = i;        // 画面上の位置（マス番号ではない）
+      var r = Math.floor(i / 9), c = i % 9;
+      // 星は盤そのものの模様なので、反転しても同じ位置に残る（点対称のため）
+      if ((r === 2 || r === 5) && (c === 2 || c === 5)) { d.classList.add('star'); this.stars[i] = 1; }
       root.appendChild(d);
       this.cells.push(d);
     }
     if (onClick) {
       root.addEventListener('click', function (e) {
         var cell = e.target.closest ? e.target.closest('.sq') : null;
-        if (cell) onClick(parseInt(cell.dataset.sq, 10));
+        if (!cell) return;
+        var idx = parseInt(cell.dataset.idx, 10);
+        if (idx >= 0) onClick(self.flip ? 80 - idx : idx);
       });
     }
   }
 
+  /** マス番号 → 画面上の位置 */
+  BoardView.prototype.at = function (sq) { return this.flip ? 80 - sq : sq; };
+
   /**
-   * st: { targets:{sq:true}, selected, lastFrom, lastTo, checkSq, hilite:[sq], mover }
+   * st: { targets:{sq:true}, selected, lastFrom, lastTo, checkSq, hilite:[sq], mover, bottom }
+   *   bottom … 下側に表示する側（駒の向きの基準）。省略時は先手。
    */
   BoardView.prototype.render = function (pos, st) {
     st = st || {};
     var targets = st.targets || {};
+    var bottom = (st.bottom === undefined) ? S.SENTE : st.bottom;
     for (var sq = 0; sq < 81; sq++) {
-      var cell = this.cells[sq];
+      var idx = this.at(sq);
+      var cell = this.cells[idx];
       var cls = 'sq';
-      if (this.stars[sq]) cls += ' star';
+      if (this.stars[idx]) cls += ' star';
       if (sq === st.lastFrom || sq === st.lastTo) cls += ' last';
       if (st.hilite && st.hilite.indexOf(sq) >= 0) cls += ' hilite';
       if (sq === st.checkSq) cls += ' check';
@@ -87,7 +98,7 @@
       clear(cell);
       if (p !== S.EMPTY) {
         var owner = S.ownerOf(p);
-        var d = el('div', 'pc' + (owner === S.GOTE ? ' gote' : '') +
+        var d = el('div', 'pc' + (owner !== bottom ? ' gote' : '') +
           (S.isProm(p) ? ' prom' : '') + (st.mover === owner ? ' mine' : ' static'));
         d.appendChild(el('span', null, S.glyph(p)));
         cell.appendChild(d);
@@ -182,16 +193,36 @@
     hilite: [],
     lastFrom: -1,
     lastTo: -1,
-    counts: {}
+    counts: {},
+    you: S.SENTE,         // あなたが持つ側（先手 or 後手）
+    gen: 0,               // 局面を差し替えるたびに増やす（予約済みのAIの手を捨てるため）
+    opponent: 'engine',   // 'engine' = 内蔵エンジン / 'external' = 外部AI
+    moveSeq: 0,           // 外部AIから受け取った指し手の通し番号
+    waiting: false        // 外部AIの手を待っている最中か
   };
-  var YOU = S.SENTE;
+
+  /**
+   * 相手の指し手を予約する。
+   * 予約してから実行までの間に新規対局・局面読み込み・待ったが入ったら、
+   * その手はもう別の局面のものなので捨てる。
+   */
+  function scheduleAi() {
+    var gen = G.gen;
+    soon(function () { if (gen === G.gen) aiTurn(); });
+  }
 
   function posKey(pos) { return S.toSfen(pos).replace(/ \d+$/, ''); }
 
-  function newGame(handicap, level) {
+  function newGame(handicap, level, side, opponent) {
+    G.gen++;
+    G.waiting = false;
     G.handicap = handicap || G.handicap;
     G.level = (level === undefined) ? G.level : level;
-    G.pos = S.newGame(G.handicap);
+    G.you = (side === undefined) ? G.you : side;
+    G.opponent = opponent || G.opponent;
+    applyOpponentMode();
+    // 駒を落とすのは相手（上手）のほう
+    G.pos = S.newGame(G.handicap, 1 - G.you);
     G.history = [];
     G.over = null;
     G.busy = false;
@@ -199,17 +230,38 @@
     G.lastFrom = -1; G.lastTo = -1;
     G.counts = {};
     G.counts[posKey(G.pos)] = 1;
+    applyOrientation();
     clear(tutorPane);
     var h = S.HANDICAPS[G.handicap];
+    var youSente = (G.you === S.SENTE);
     pushMsg({
-      tone: 'ok', title: h.label + 'で対局開始',
+      tone: 'ok', title: h.label + '・' + (youSente ? '先手' : '後手') + 'で対局開始',
       lines: [
-        'あなたは<b>先手（下側）</b>です。駒をクリックすると、動けるマスが緑の丸で光ります。',
+        'あなたは<b>' + (youSente ? '先手' : '後手') + '</b>。あなたの駒がいつも<b>下側</b>に来るように盤を向けてあります。' +
+          '駒をクリックすると、動けるマスが緑の丸で光ります。',
+        youSente ? 'あなたの先手番です。どうぞ。' : 'まず相手（先手）が指します。少し待ってください。',
         '迷ったら「ヒント」、詰みがありそうなら「詰みチェック」を押してください。'
       ]
     });
     render();
     saveGame();
+    // 後手を持ったときは相手（先手）から
+    if (G.pos.turn !== G.you) { G.busy = true; render(); scheduleAi(); }
+  }
+
+  /** 盤の向き（あなたが下）と、筋・段のラベルをそろえる */
+  function applyOrientation() {
+    boardView.flip = (G.you === S.GOTE);
+    renderBoardLabels(boardView.flip);
+  }
+
+  function renderBoardLabels(flip) {
+    var fl = $('fileLabels');
+    clear(fl);
+    for (var c = 0; c < 9; c++) fl.appendChild(el('span', null, String(flip ? c + 1 : 9 - c)));
+    var rl = $('rankLabels');
+    clear(rl);
+    for (var r = 0; r < 9; r++) rl.appendChild(el('span', null, S.RANK_KANJI[flip ? 8 - r : r]));
   }
 
   function saveGame() {
@@ -218,6 +270,8 @@
         sfen: S.toSfen(G.pos),
         handicap: G.handicap,
         level: G.level,
+        you: G.you,
+        opponent: G.opponent,
         kifu: G.history.map(function (h) { return h.kanji; }),
         over: G.over
       }));
@@ -232,6 +286,8 @@
       G.pos = S.fromSfen(d.sfen);
       G.handicap = d.handicap || 'even';
       G.level = (d.level === undefined) ? 2 : d.level;
+      G.you = (d.you === S.GOTE) ? S.GOTE : S.SENTE;
+      G.opponent = (d.opponent === 'external') ? 'external' : 'engine';
       G.over = d.over || null;
       G.history = (d.kifu || []).map(function (k) { return { kanji: k, undo: null }; });
       G.counts = {};
@@ -240,7 +296,7 @@
     } catch (e) { return false; }
   }
 
-  function myTurn() { return !G.over && !G.busy && G.pos.turn === YOU; }
+  function myTurn() { return !G.over && !G.busy && G.pos.turn === G.you; }
 
   function render() {
     var check = S.inCheck(G.pos, G.pos.turn) ? G.pos.kings[G.pos.turn] : -1;
@@ -251,10 +307,12 @@
       lastTo: G.lastTo,
       checkSq: check,
       hilite: G.hilite,
-      mover: myTurn() ? YOU : -1
+      mover: myTurn() ? G.you : -1,
+      bottom: G.you
     });
-    renderHand($('handGote'), G.pos, S.GOTE, {});
-    renderHand($('handSente'), G.pos, S.SENTE, {
+    // handGote / handSente は「上の駒台」「下の駒台」という位置の意味で使う
+    renderHand($('handGote'), G.pos, 1 - G.you, {});
+    renderHand($('handSente'), G.pos, G.you, {
       selected: G.dropType,
       onPick: myTurn() ? pickDrop : null
     });
@@ -272,9 +330,10 @@
     var s = $('status');
     s.className = 'status';
     if (G.over) { s.textContent = G.over.text; s.classList.add('alert'); return; }
+    if (G.waiting) { s.textContent = '相手（外部AI）の指し手を待っています…'; s.classList.add('think'); return; }
     if (G.busy) { s.textContent = '相手が考えています…'; s.classList.add('think'); return; }
     var parts = [(G.history.length + 1) + '手目'];
-    parts.push(G.pos.turn === YOU ? 'あなたの番' : '相手の番');
+    parts.push(G.pos.turn === G.you ? 'あなたの番' : '相手の番');
     if (S.inCheck(G.pos, G.pos.turn)) {
       parts.push('王手！');
       s.classList.add('alert');
@@ -284,10 +343,13 @@
 
   function renderKifu() {
     clear(kifuPane);
+    // 形勢は「あなたから見て」表示する（後手を持つときは符号が逆になる）
+    var youSente = (G.you === S.SENTE);
     var sc = AI.evaluate(G.pos);
-    var pct = Math.max(2, Math.min(98, 50 + sc / 40));
+    var mine = youSente ? sc : -sc;
+    var pct = Math.max(2, Math.min(98, 50 + mine / 40));
     var wrap = el('div');
-    wrap.appendChild(el('p', null, T.describeScore(sc)));
+    wrap.appendChild(el('p', null, T.describeScore(sc, youSente)));
     var bar = el('div', 'eval-bar');
     var fill = el('i');
     fill.style.width = pct + '%';
@@ -333,7 +395,7 @@
     G.hilite = [];
     if (G.targets[sq]) { chooseMove(G.targets[sq]); return; }
     var p = G.pos.board[sq];
-    if (p !== S.EMPTY && S.ownerOf(p) === YOU) {
+    if (p !== S.EMPTY && S.ownerOf(p) === G.you) {
       clearSel();
       G.sel = sq;
       S.movesFrom(G.pos, sq).forEach(function (m) {
@@ -383,17 +445,20 @@
     if (checkEnd()) return;
     G.busy = true;
     render();
+    var gen = G.gen;
     soon(function () {
+      if (gen !== G.gen) return;
       if (settings.review) {
         var rv = T.reviewMove(before, m, { ms: 400 });
         pushMsg({ tone: rv.tone, title: rv.title, lines: [ '<span class="mv">' + esc(rv.kanji) + '</span>' ].concat(rv.lines.map(esc)) });
       }
-      soon(aiTurn);
+      scheduleAi();
     });
   }
 
   function aiTurn() {
     if (G.over) { G.busy = false; render(); return; }
+    if (G.opponent === 'external') { waitForExternal(); return; }
     var res = AI.think(G.pos, { level: G.level });
     if (!res.move) { G.busy = false; checkEnd(); return; }
     applyMove(res.move);
@@ -402,7 +467,7 @@
     saveGame();
     if (checkEnd()) return;
     // 王手されている・大駒が危ないなど、気づいてほしいことだけ知らせる
-    var notes = T.comment(G.pos);
+    var notes = T.comment(G.pos, G.you === S.SENTE);
     if (notes.length > 1) {
       pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
     }
@@ -412,8 +477,8 @@
     if (G.over) return true;
     if (S.legalMoves(G.pos).length === 0) {
       var loser = G.pos.turn;
-      finish(loser === YOU ? 'lose' : 'win',
-        loser === YOU ? 'あなたの負けです（詰み）' : 'あなたの勝ちです！（詰み）');
+      finish(loser === G.you ? 'lose' : 'win',
+        loser === G.you ? 'あなたの負けです（詰み）' : 'あなたの勝ちです！（詰み）');
       return true;
     }
     if (G.counts[posKey(G.pos)] >= 4) {
@@ -439,7 +504,9 @@
   }
 
   function undoMove() {
-    if (G.busy) return;
+    if (G.busy && !G.waiting) return;
+    G.gen++;
+    G.waiting = false;
     // 自分の手番に戻るまで戻す（相手の手＋自分の手＝2手）
     var n = 0;
     while (G.history.length && n < 2) {
@@ -450,7 +517,7 @@
       G.counts[k] = Math.max(0, (G.counts[k] || 1) - 1);
       S.undoMove(G.pos, h.undo);
       n++;
-      if (G.pos.turn === YOU) break;
+      if (G.pos.turn === G.you) break;
     }
     G.over = null;
     clearSel();
@@ -472,7 +539,9 @@
 
   function showHint() {
     G.busy = true; render();
+    var gen = G.gen;
     soon(function () {
+      if (gen !== G.gen) return;
       var h = T.hint(G.pos);
       G.busy = false;
       if (h.move) {
@@ -491,7 +560,9 @@
 
   function mateCheck() {
     G.busy = true; render();
+    var gen = G.gen;
     soon(function () {
+      if (gen !== G.gen) return;
       var m1 = S.findMate(G.pos, 1);
       var m3 = m1 ? null : S.findMate(G.pos, 3);
       G.busy = false;
@@ -652,7 +723,7 @@
 
     function draw() {
       view.render(pos, {
-        targets: state.targets, selected: state.sel, mover: pos.turn
+        targets: state.targets, selected: state.sel, mover: pos.turn, bottom: S.SENTE
       });
       if (handRoot) {
         renderHand(handRoot, pos, pos.turn, {
@@ -718,7 +789,8 @@
       selected: TS.sel === undefined ? -1 : TS.sel,
       checkSq: check,
       hilite: [],
-      mover: (!TS.done && TS.pos.turn === S.SENTE) ? S.SENTE : -1
+      mover: (!TS.done && TS.pos.turn === S.SENTE) ? S.SENTE : -1,
+      bottom: S.SENTE
     });
     renderHand($('handGote'), TS.pos, S.GOTE, {});
     renderHand($('handSente'), TS.pos, S.SENTE, {
@@ -838,8 +910,19 @@
     $('playControls').classList.toggle('hidden', v !== 'play');
     $('tsumeControls').classList.toggle('hidden', v !== 'tsume');
     if (v === 'lesson') renderLesson();
-    if (v === 'tsume') { tsumeClear(); loadProblem(TS.index); }
-    if (v === 'play') { clear(tutorPane); render(); pushMsg({ tone: 'ok', title: '対局にもどりました', lines: ['続きからどうぞ。'] }); }
+    if (v === 'tsume') {
+      // 詰将棋は必ず先手（あなた）が下
+      boardView.flip = false;
+      renderBoardLabels(false);
+      tsumeClear();
+      loadProblem(TS.index);
+    }
+    if (v === 'play') {
+      applyOrientation();
+      clear(tutorPane);
+      render();
+      pushMsg({ tone: 'ok', title: '対局にもどりました', lines: ['続きからどうぞ。'] });
+    }
   }
 
   // ------------------------------------------------------------ 設定画面
@@ -850,13 +933,26 @@
     lines.push('=== 将棋 局面 ===');
     lines.push('手合割: ' + S.HANDICAPS[G.handicap].label +
       ' / ' + (G.history.length + 1) + '手目' +
-      ' / あなた=先手（下側・v なしの駒）');
+      ' / あなた=' + (G.you === S.SENTE
+        ? '先手（下の図で下側・v なしの駒）'
+        : '後手（下の図で上側・v つきの駒）'));
     lines.push(S.toText(G.pos));
     lines.push('SFEN: ' + S.toSfen(G.pos));
     if (G.history.length) {
       lines.push('棋譜: ' + G.history.map(function (h) { return h.kanji; }).join(' '));
     }
     if (G.over) lines.push('結果: ' + G.over.text);
+
+    // 外部AIに相手役を任せているときは、指し方の説明と合法手を添える
+    if (G.opponent === 'external' && !G.over && G.pos.turn !== G.you) {
+      var comSide = (G.pos.turn === S.SENTE) ? '先手' : '後手';
+      lines.push('');
+      lines.push('★ あなた（COM側 = ' + comSide + '）の手番です。次の一手を指してください。');
+      lines.push('指し方: このフォルダの com-move.txt に指し手を1行だけ書く');
+      lines.push('        （または POST http://localhost:8765/move に本文として送る）');
+      lines.push('書き方: USI「7g7f」「7g7f+」「P*5e」／漢字「▲7六歩」「5二金打」／数字「77-76」 どれでも可');
+      lines.push('指せる手（USI）: ' + S.legalMoves(G.pos).map(S.moveToUsi).join(' '));
+    }
     lines.push('=================');
     return lines.join('\n');
   }
@@ -922,6 +1018,7 @@
       $('shareHint').textContent = '⚠ この局面は読み込めませんでした（玉が両方そろっている必要があります）。';
       return;
     }
+    G.gen++;
     G.pos = pos;
     G.history = [];
     G.over = null;
@@ -939,7 +1036,7 @@
       lines: ['ここから指せます。手番は<b>' + (G.pos.turn === S.SENTE ? 'あなた（先手）' : '相手（後手）') + '</b>です。',
         '棋譜はリセットされるので、この手より前には「待った」で戻れません。']
     });
-    if (G.pos.turn !== YOU) { G.busy = true; render(); soon(aiTurn); }
+    if (G.pos.turn !== G.you) { G.busy = true; render(); scheduleAi(); }
   }
 
   // ---- ローカル連携（bridge.py を動かしているときだけ有効）
@@ -963,6 +1060,101 @@
       headers: { 'content-type': 'text/plain;charset=utf-8' },
       body: shareText()
     }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------ 外部AIとの対局
+  /**
+   * 相手の手番を外部（Claude Code / Cursor / ChatGPT など）に任せる。
+   * 局面を書き出して、com-move.txt か POST /move に手が来るのを待つ。
+   * 連携サーバーが無くても、画面の入力欄から手で入れれば指せる。
+   */
+  function waitForExternal() {
+    G.busy = true;
+    G.waiting = true;
+    render();
+    pushBridge();                       // COMの手番であることを含めて局面を出す
+    extMsg('相手（外部AI）の指し手を待っています…', false);
+    pollExternal(G.gen);
+  }
+
+  function pollExternal(gen) {
+    if (gen !== G.gen || !G.waiting || !bridge.url) return;
+    fetch(bridge.url + '/move?since=' + G.moveSeq, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (gen !== G.gen || !G.waiting) return;
+        if (typeof d.seq === 'number') G.moveSeq = d.seq;
+        if (d.move) applyExternalMove(d.move, d.source || '外部');
+        else setTimeout(function () { pollExternal(gen); }, 1000);
+      })
+      .catch(function () {
+        if (gen === G.gen && G.waiting) setTimeout(function () { pollExternal(gen); }, 2000);
+      });
+  }
+
+  /** 外部から届いた指し手を盤に反映する。読めなければ理由を出して待ち続ける */
+  function applyExternalMove(text, source) {
+    if (G.over) return;
+    if (G.pos.turn === G.you) { extMsg('いまはあなたの手番です。', true); return; }
+    var r = S.parseMoveText(G.pos, text);
+    if (r.move === null) {
+      var why = {
+        illegal: 'その手は指せません（ルール上の反則か、駒がありません）',
+        ambiguous: '候補が複数あります → ' + r.candidates.join(' / ') + '（移動元を付けてください）',
+        unreadable: '書き方が読み取れません'
+      }[r.error] || '読み取れません';
+      extMsg('「' + text + '」: ' + why, true);
+      pushMsg({
+        tone: 'bad', who: '外部AI', title: '指し手を受け付けられません',
+        lines: [esc(String(text)) + ' — ' + esc(why), '正しい手が届くまで待っています。']
+      });
+      pushBridge();                     // 合法手リストを添えて出し直す
+      if (G.waiting) pollExternal(G.gen);
+      return;
+    }
+    G.waiting = false;
+    var kanji = applyMove(r.move);
+    G.busy = false;
+    render();
+    saveGame();
+    extMsg('相手が ' + kanji + ' と指しました（' + source + '）', false);
+    pushMsg({ tone: 'ok', who: '相手（外部AI）', title: kanji, lines: ['受け取り元: ' + esc(source)] });
+    if (checkEnd()) return;
+    var notes = T.comment(G.pos, G.you === S.SENTE);
+    if (notes.length > 1) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
+  }
+
+  function extMsg(text, isError) {
+    var e = $('extState');
+    if (!e) return;
+    e.textContent = text || '';
+    e.className = 'ext-state' + (isError ? ' err' : '');
+  }
+
+  /** 入力欄から相手の手を指す（ChatGPT の答えを貼り付ける用） */
+  function submitManualMove() {
+    var box = $('comMoveInput');
+    var v = box.value.trim();
+    if (!v) return;
+    if (G.pos.turn === G.you) { extMsg('いまはあなたの手番です。', true); return; }
+    applyExternalMove(v, '手入力');
+    box.value = '';
+  }
+
+  function applyOpponentMode() {
+    $('externalRow').classList.toggle('hidden', G.opponent !== 'external');
+    $('levelSel').disabled = (G.opponent === 'external');
+    if (G.opponent !== 'external') { G.waiting = false; extMsg('', false); }
+  }
+
+  /** 画面で選ばれている手合割・手番・強さで対局を始める */
+  function startNewGame() {
+    newGame(
+      $('handicapSel').value,
+      parseInt($('levelSel').value, 10),
+      parseInt($('sideSel').value, 10) === S.GOTE ? S.GOTE : S.SENTE,
+      $('oppSel').value === 'external' ? 'external' : 'engine'
+    );
   }
 
   /** いま表示している画面を描き直す */
@@ -1002,12 +1194,6 @@
     kifuPane = $('paneKifu');
     piecePane = $('panePieces');
 
-    // 盤ラベル
-    var fl = $('fileLabels');
-    for (var c = 0; c < 9; c++) fl.appendChild(el('span', null, String(9 - c)));
-    var rl = $('rankLabels');
-    for (var r = 0; r < 9; r++) rl.appendChild(el('span', null, S.RANK_KANJI[r]));
-
     boardView = new BoardView($('board'), function (sq) {
       if (view === 'play') onSquare(sq);
       else if (view === 'tsume') onTsumeSquare(sq);
@@ -1033,6 +1219,10 @@
     }
     hs.value = G.handicap;
     ls.value = G.level;
+    $('sideSel').value = String(G.you);
+    $('oppSel').value = G.opponent;
+    applyOpponentMode();
+    applyOrientation();
 
     // イベント
     $('viewTabs').addEventListener('click', function (e) {
@@ -1050,9 +1240,7 @@
       if (p === 'pieces') renderPieceGuide(piecePane);
     });
 
-    $('newGameBtn').addEventListener('click', function () {
-      newGame($('handicapSel').value, parseInt($('levelSel').value, 10));
-    });
+    $('newGameBtn').addEventListener('click', startNewGame);
     $('undoBtn').addEventListener('click', undoMove);
     $('hintBtn').addEventListener('click', showHint);
     $('mateBtn').addEventListener('click', mateCheck);
@@ -1060,6 +1248,24 @@
     $('resignBtn').addEventListener('click', function () {
       if (G.over) return;
       finish('lose', 'あなたの投了で終局しました。');
+    });
+
+    $('oppSel').addEventListener('change', function () {
+      G.opponent = this.value === 'external' ? 'external' : 'engine';
+      applyOpponentMode();
+      saveGame();
+      pushMsg({
+        tone: 'ok', title: '対局相手を切り替えました',
+        lines: [G.opponent === 'external'
+          ? '相手の手は外部AI（com-move.txt / POST /move / 下の入力欄）から受け取ります。次の相手番から有効です。'
+          : '相手の手は内蔵エンジンが指します。']
+      });
+      // すでに相手の手番なら、その場で待ち受けを始める
+      if (!G.over && G.pos.turn !== G.you && G.opponent === 'external') waitForExternal();
+    });
+    $('comMoveBtn').addEventListener('click', submitManualMove);
+    $('comMoveInput').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') submitManualMove();
     });
 
     $('shareBtn').addEventListener('click', openShare);
@@ -1074,7 +1280,7 @@
     $('overClose').addEventListener('click', function () { $('overModal').classList.add('hidden'); });
     $('overNew').addEventListener('click', function () {
       $('overModal').classList.add('hidden');
-      newGame($('handicapSel').value, parseInt($('levelSel').value, 10));
+      startNewGame();
     });
 
     $('tsumePrev').addEventListener('click', function () { loadProblem(TS.index - 1); });

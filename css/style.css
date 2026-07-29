@@ -581,3 +581,18 @@ select, input[type="password"], input[type="text"] {
   .lesson-body { padding: 18px 16px 24px; }
   main { padding: 14px 10px 50px; }
 }
+
+/* ---------------------------------------------- 外部AI対局 */
+.external-row { align-items: center; }
+.external-row input[type="text"] {
+  flex: 1;
+  min-width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+}
+.ext-state { font-size: 11.5px; color: var(--accent-2); flex-basis: 100%; }
+.ext-state:empty { display: none; }
+.ext-state.err { color: var(--bad); }

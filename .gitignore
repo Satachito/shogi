@@ -1,0 +1,6 @@
+# bridge.js が実行中に書き出すファイル（対局ごとに変わるので追跡しない）
+current-position.txt
+com-move.txt
+
+# macOS
+.DS_Store

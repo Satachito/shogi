@@ -274,9 +274,15 @@
   }
 
   /** 形勢を言葉で */
-  function describeScore(senteScore) {
-    var a = Math.abs(senteScore);
-    var who = senteScore > 0 ? 'あなた' : 'Claude';
+  /**
+   * 形勢を日本語にする。
+   * @param senteScore 先手から見た点数
+   * @param youSente   あなたが先手か（false なら符号を反転して読む）
+   */
+  function describeScore(senteScore, youSente) {
+    var mine = (youSente === false) ? -senteScore : senteScore;
+    var a = Math.abs(mine);
+    var who = mine > 0 ? 'あなた' : '相手';
     if (a < 250) return '形勢は互角です。';
     if (a < 700) return who + 'が少し良さそうです。';
     if (a < 1600) return who + 'が有利です。';
@@ -457,10 +463,10 @@
   }
 
   /** 局面についての短いコメント（手番の人へ） */
-  function comment(pos) {
+  function comment(pos, youSente) {
     var lines = [];
     var sc = AI.evaluate(pos);
-    lines.push(describeScore(sc));
+    lines.push(describeScore(sc, youSente));
     if (S.inCheck(pos, pos.turn)) {
       lines.push('王手がかかっています。受けなければいけません。');
     } else {

@@ -203,7 +203,7 @@
       (hand || '-') + ' ' + (pos.ply + 1);
   }
 
-  /** 駒落ち。上手（後手＝上側）の駒を落とす */
+  /** 駒落ち。落とすマスは後手側の座標で書く（上手が先手のときは点対称に読み替える） */
   var HANDICAPS = {
     'even':  { label: '平手',     remove: [] },
     'lance': { label: '香落ち',   remove: ['1一'] },
@@ -221,10 +221,22 @@
     return sqOf(rank - 1, 9 - file);
   }
 
-  function newGame(handicap) {
+  /**
+   * 初期局面を作る。
+   * @param handicap 手合割のキー（'even' など）
+   * @param uwate    駒を落とす側（上手）。省略時は後手。
+   */
+  function newGame(handicap, uwate) {
     var pos = fromSfen(HIRATE);
     var h = HANDICAPS[handicap || 'even'];
-    if (h) h.remove.forEach(function (sn) { pos.board[parseSqName(sn)] = EMPTY; });
+    var up = (uwate === undefined || uwate === null) ? GOTE : uwate;
+    if (h) {
+      h.remove.forEach(function (sn) {
+        var sq = parseSqName(sn);
+        // 上手が先手なら、盤を180度回した位置の駒を落とす
+        pos.board[up === GOTE ? sq : 80 - sq] = EMPTY;
+      });
+    }
     refreshKings(pos);
     return pos;
   }
@@ -559,6 +571,94 @@
   }
 
   // ---------------------------------------------------------------- API
+  // ---------------------------------------------------------- 指し手の読み書き
+  // 外部のAIやツールとやりとりするための入出力。
+  // 書き出しは USI（将棋ソフト共通の書き方）、読み取りは USI・数字・漢字のどれでも受ける。
+
+  var USI_PIECE = ['K', 'R', 'B', 'G', 'S', 'N', 'L', 'P'];   // 添字＝駒種
+
+  /** マス番号 → USI（例: 7七 → '7g'） */
+  function sqUsi(sq) { return String(9 - colOf(sq)) + 'abcdefghi'[rowOf(sq)]; }
+
+  /** USI → マス番号。読めなければ -1 */
+  function usiSq(str) {
+    var file = parseInt(str[0], 10);
+    var rank = 'abcdefghi'.indexOf(str[1]) + 1;
+    if (!(file >= 1 && file <= 9) || rank < 1) return -1;
+    return sqOf(rank - 1, 9 - file);
+  }
+
+  /** 指し手 → USI（例: '7g7f' / '7g7f+' / 'P*5e'） */
+  function moveToUsi(m) {
+    if (mvIsDrop(m)) return USI_PIECE[mvDropType(m)] + '*' + sqUsi(mvTo(m));
+    return sqUsi(mvFrom(m)) + sqUsi(mvTo(m)) + (mvProm(m) ? '+' : '');
+  }
+
+  /** その手を表す書き方を全部集める（読み取りの照合用） */
+  function moveAliases(pos, m) {
+    var out = [moveToUsi(m), moveToKanji(pos, m, -1).replace(/^[▲△]/, '')];
+    var to = sqName(mvTo(m));
+    if (mvIsDrop(m)) {
+      var dt = mvDropType(m);
+      out.push(to + GLYPH[dt] + '打', to + GLYPH[dt], to + NAME[dt] + '打', to + NAME[dt]);
+    } else {
+      var pc = pos.board[mvFrom(m)], t = typeOf(pc), pr = isProm(pc);
+      var g = pr ? GLYPH_PROM[t] : GLYPH[t], n = pr ? NAME_PROM[t] : NAME[t];
+      var suf = mvProm(m) ? '成' : '';
+      var fromNum = String(9 - colOf(mvFrom(m))) + String(rowOf(mvFrom(m)) + 1);
+      var toNum = String(9 - colOf(mvTo(m))) + String(rowOf(mvTo(m)) + 1);
+      out.push(to + g + suf, to + n + suf);
+      out.push(to + g + suf + '(' + fromNum + ')', to + n + suf + '(' + fromNum + ')');
+      out.push(fromNum + '-' + toNum + (mvProm(m) ? '+' : ''));
+      out.push(fromNum + toNum + (mvProm(m) ? '+' : ''));
+      if (!mvProm(m) && CAN_PROMOTE[t] && !pr) out.push(to + g + '不成', to + n + '不成');
+    }
+    return out;
+  }
+
+  /**
+   * 文字列から指し手を読み取る。USI（7g7f, P*5e）、数字（77-76, 7776+）、
+   * 漢字（7六歩, ▲2四歩成, 5二金打）のどれでも受け付ける。
+   * @return { move, error, candidates }
+   *         move が null のとき error は
+   *         'unreadable'（書き方が不明）/ 'illegal'（読めたが指せない）/ 'ambiguous'（候補が複数）
+   */
+  function parseMoveText(pos, text) {
+    var fail = function (err, cand) { return { move: null, error: err, candidates: cand || [] }; };
+    if (text === undefined || text === null) return fail('unreadable');
+
+    var s = String(text)
+      .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+      .replace(/[Ａ-Ｚａ-ｚ]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+      .replace(/＋/g, '+').replace(/＊/g, '*')
+      .replace(/\s+/g, '')
+      .replace(/^[▲△▼▽先後手]+/, '')      // 手番記号は無視
+      .replace(/^[0-9]+[.．]/, '');          // 「12.」のような手数も無視
+    if (!s) return fail('unreadable');
+
+    var legal = legalMoves(pos);
+    var hit = [], i, j;
+
+    // USI の打つ手だけ大文字小文字を吸収したいので、比較は素の文字列と小文字の両方で
+    for (i = 0; i < legal.length; i++) {
+      var al = moveAliases(pos, legal[i]);
+      for (j = 0; j < al.length; j++) {
+        if (al[j] === s || al[j].toLowerCase() === s.toLowerCase()) { hit.push(legal[i]); break; }
+      }
+    }
+    if (hit.length === 1) return { move: hit[0], error: null, candidates: [] };
+    if (hit.length > 1) {
+      return fail('ambiguous', hit.map(function (m) { return moveToKanji(pos, m, -1, { origin: true }); }));
+    }
+
+    // 形としては読めるが指せない手なのか、そもそも読めないのかを分けて返す
+    var shaped = /^([1-9][a-i])([1-9][a-i])\+?$/i.test(s) ||
+                 /^[KRBGSNLP]\*[1-9][a-i]$/i.test(s) ||
+                 /^[1-9][1-9][-x]?[1-9][1-9](\+|成)?$/.test(s) ||
+                 /^[1-9][一二三四五六七八九]/.test(s);
+    return fail(shaped ? 'illegal' : 'unreadable');
+  }
+
   return {
     SENTE: SENTE, GOTE: GOTE, EMPTY: EMPTY,
     K: K, R: R, B: B, G: G, S: S, N: N, L: L, P: P,
@@ -573,6 +673,7 @@
     sqOf: sqOf, rowOf: rowOf, colOf: colOf, sqName: sqName, parseSqName: parseSqName,
     inZone: inZone, lastRank: lastRank, mustPromote: mustPromote,
 
+    moveToUsi: moveToUsi, parseMoveText: parseMoveText,
     encMove: encMove, mvFrom: mvFrom, mvTo: mvTo, mvProm: mvProm,
     mvDropType: mvDropType, mvIsDrop: mvIsDrop,
 
