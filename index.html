@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>将棋道場 — Claudeと学ぶ将棋</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♟️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <h1 class="brand">将棋道場<span class="brand-sub">Claudeと学ぶ</span></h1>
+  <nav class="view-tabs" id="viewTabs">
+    <button type="button" data-view="play" class="on">対局</button>
+    <button type="button" data-view="lesson">レッスン</button>
+    <button type="button" data-view="tsume">詰将棋</button>
+  </nav>
+  <button type="button" class="icon-btn" id="settingsBtn" title="設定" aria-label="設定">⚙</button>
+</header>
+
+<main id="main">
+
+  <!-- ============================ 対局 / 詰将棋 ============================ -->
+  <div class="game-layout" id="gameLayout">
+
+    <section class="board-area">
+      <div class="hand hand-gote" id="handGote" aria-label="後手の持ち駒"></div>
+
+      <div class="board-frame">
+        <div class="file-labels" id="fileLabels"></div>
+        <div class="board-row">
+          <div class="board" id="board"></div>
+          <div class="rank-labels" id="rankLabels"></div>
+        </div>
+      </div>
+
+      <div class="hand hand-sente" id="handSente" aria-label="先手（あなた）の持ち駒"></div>
+
+      <p class="status" id="status">対局を始めましょう。</p>
+
+      <div class="controls" id="playControls">
+        <div class="control-row">
+          <label>手合割
+            <select id="handicapSel"></select>
+          </label>
+          <label>相手の強さ
+            <select id="levelSel"></select>
+          </label>
+          <button type="button" class="btn primary" id="newGameBtn">新規対局</button>
+        </div>
+        <div class="control-row">
+          <button type="button" class="btn" id="undoBtn">待った</button>
+          <button type="button" class="btn" id="hintBtn">ヒント</button>
+          <button type="button" class="btn" id="mateBtn">詰みチェック</button>
+          <button type="button" class="btn" id="askBtn">Claudeに聞く</button>
+          <button type="button" class="btn danger" id="resignBtn">投了</button>
+        </div>
+        <div class="control-row">
+          <button type="button" class="btn" id="shareBtn">チャットに貼る</button>
+          <button type="button" class="btn" id="loadBtn">局面を読み込む</button>
+          <span class="bridge-state" id="bridgeState"></span>
+        </div>
+      </div>
+
+      <div class="controls hidden" id="tsumeControls">
+        <div class="control-row">
+          <button type="button" class="btn" id="tsumePrev">前の問題</button>
+          <span class="tsume-label" id="tsumeLabel"></span>
+          <button type="button" class="btn" id="tsumeNext">次の問題</button>
+        </div>
+        <div class="control-row">
+          <button type="button" class="btn" id="tsumeReset">やり直す</button>
+          <button type="button" class="btn" id="tsumeHint">ヒント</button>
+          <button type="button" class="btn" id="tsumeAnswer">答えを見る</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="panel-tabs" id="panelTabs">
+        <button type="button" data-pane="tutor" class="on">先生</button>
+        <button type="button" data-pane="kifu">棋譜</button>
+        <button type="button" data-pane="pieces">駒の動き</button>
+      </div>
+      <div class="pane on" id="paneTutor"></div>
+      <div class="pane" id="paneKifu"></div>
+      <div class="pane" id="panePieces"></div>
+    </aside>
+  </div>
+
+  <!-- ================================ レッスン ================================ -->
+  <div class="lesson-layout hidden" id="lessonLayout">
+    <nav class="lesson-nav" id="lessonNav"></nav>
+    <article class="lesson-body" id="lessonBody"></article>
+  </div>
+
+</main>
+
+<!-- 成る／成らない -->
+<div class="modal hidden" id="promoteModal">
+  <div class="modal-card">
+    <p class="modal-title" id="promoteText">成りますか？</p>
+    <div class="modal-actions">
+      <button type="button" class="btn primary" id="promoteYes">成る</button>
+      <button type="button" class="btn" id="promoteNo">成らない</button>
+    </div>
+  </div>
+</div>
+
+<!-- 設定 -->
+<div class="modal hidden" id="settingsModal">
+  <div class="modal-card wide">
+    <p class="modal-title">設定</p>
+
+    <label class="field">
+      <span>効果音</span>
+      <input type="checkbox" id="soundChk">
+    </label>
+
+    <label class="field">
+      <span>指したあと先生に講評してもらう</span>
+      <input type="checkbox" id="reviewChk">
+    </label>
+
+    <hr>
+
+    <p class="field-title">Claude 連携（任意）</p>
+    <p class="hint">
+      Anthropic の APIキーを入れると、本物の Claude が局面を解説してくれます。
+      入れなくても、このアプリの先生・レッスン・詰将棋はすべて使えます。
+    </p>
+    <label class="field col">
+      <span>APIキー</span>
+      <input type="password" id="apiKeyInput" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    </label>
+    <label class="field col">
+      <span>モデル</span>
+      <select id="modelSel"></select>
+    </label>
+    <p class="warn">
+      キーはこの端末のブラウザ内（localStorage）にだけ保存され、Anthropic 以外には送信されません。
+      共用のパソコンでは使わないでください。利用したぶんの API 料金がかかります。
+    </p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn primary" id="settingsSave">保存して閉じる</button>
+      <button type="button" class="btn" id="settingsClose">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 局面の受け渡し -->
+<div class="modal hidden" id="shareModal">
+  <div class="modal-card wide">
+    <p class="modal-title" id="shareTitle">この局面をチャットに貼る</p>
+    <p class="hint" id="shareHint"></p>
+    <textarea id="shareText" class="share-text" spellcheck="false"></textarea>
+    <div class="modal-actions">
+      <button type="button" class="btn primary" id="shareCopy">コピー</button>
+      <button type="button" class="btn primary hidden" id="shareLoad">読み込む</button>
+      <button type="button" class="btn" id="shareClose">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 対局終了 -->
+<div class="modal hidden" id="overModal">
+  <div class="modal-card">
+    <p class="modal-title" id="overTitle"></p>
+    <p id="overText"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn primary" id="overNew">もう一局</button>
+      <button type="button" class="btn" id="overClose">局面を見る</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/engine.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/tutor.js"></script>
+<script src="js/claude.js"></script>
+<script src="js/ui.js"></script>
+</body>
+</html>
