@@ -144,8 +144,8 @@ node bridge.js
 
 1. 環境変数 `SHOGI_USI_ENGINE` のパス
 2. `engine/yaneuraou`（このフォルダの中）
-3. `../YaneuraOu/bin/yaneuraou-material`
-4. `../YaneuraOu/bin/yaneuraou-nnue`
+3. `../YaneuraOu/bin/yaneuraou-nnue`
+4. `../YaneuraOu/bin/yaneuraou-material`
 
 ### 調整
 
@@ -154,6 +154,7 @@ node bridge.js
 | `SHOGI_USI_BYOYOMI` | 1000 | 1手の思考時間（ミリ秒） |
 | `SHOGI_USI_DEPTH` | 0 | 読みの深さ上限。0で無制限。小さくすると弱くなる |
 | `SHOGI_USI_THREADS` | 1 | 思考に使うスレッド数 |
+| `SHOGI_USI_FV_SCALE` | 20 | 評価値の倍率。評価関数ごとに推奨値がある（Háo は 20） |
 
 ```bash
 # 少し弱くして、じっくり考えさせる
@@ -178,8 +179,28 @@ make -j$(sysctl -n hw.ncpu) normal \
 - M1〜M4 すべて `TARGET_CPU=APPLEM1` を指定します
 - **エディションを変えるときは先に `make clean`。** しないとオブジェクトが再利用され、
   指定と違うものができます
-- `YANEURAOU_ENGINE_MATERIAL`（駒得のみ）は**評価関数ファイル不要でそのまま動きます**。
-  `YANEURAOU_ENGINE_NNUE` は別途 `nn.bin`（数十〜数百MB）を `eval/` に置く必要があります
+- `YANEURAOU_ENGINE_MATERIAL`（駒得のみ）は**評価関数ファイル不要でそのまま動きます**
+- `YANEURAOU_ENGINE_NNUE` は別途 `nn.bin` が必要です（次項）
+
+### 評価関数（NNUE）の入れ方
+
+`YANEURAOU_ENGINE_NNUE` は halfkp_256x2-32-32 という構造の評価関数を使います。
+**構造が一致しないファイルは読み込めません。** この構造で無料で入手できるいちばん強いものが
+**Háo（ハオ）** です。
+
+```bash
+curl -L -o hao.7z https://github.com/nodchip/tanuki-/releases/download/tanuki-.halfkp_256x2-32-32.2023-05-08/tanuki-.halfkp_256x2-32-32.2023-05-08.7z
+7zz x hao.7z                      # brew install sevenzip
+cp eval/nn.bin <実行ファイルと同じ場所>/eval/nn.bin
+```
+
+- **`nn.bin` は実行ファイルと同じ階層の `eval/` に置きます**（エンジンは自分のいる場所から探します）
+- Háo は **`FV_SCALE` を 20** にするのが推奨です（bridge.js が自動で設定します）
+- ダウンロードは 23MB、展開後の `nn.bin` は 61MB、ライセンスは GPL-3.0
+
+より強い評価関数（水匠10・11 など）は**スポンサー限定または有償**で、かつ別の構造なので
+`YANEURAOU_EDITION` を変えて再ビルドする必要があります。強さの一覧は
+[やねうら王のインストール手順](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のインストール手順) にあります。
 
 ---
 

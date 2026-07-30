@@ -78,13 +78,15 @@ function pickUpMoveFile() {
 const ENGINE_CANDIDATES = [
   process.env.SHOGI_USI_ENGINE,
   path.join(ROOT, 'engine', 'yaneuraou'),
-  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-material'),
-  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-nnue')
+  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-nnue'),
+  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-material')
 ].filter(Boolean);
 
 const ENGINE_BYOYOMI = Number(process.env.SHOGI_USI_BYOYOMI || 1000);
 const ENGINE_DEPTH = Number(process.env.SHOGI_USI_DEPTH || 0);
 const ENGINE_THREADS = Number(process.env.SHOGI_USI_THREADS || 1);
+// 評価関数ごとに推奨値がある。Háo は 20（エンジン既定は 16）
+const ENGINE_FV_SCALE = Number(process.env.SHOGI_USI_FV_SCALE || 20);
 
 /** USIエンジンと1行ずつやりとりする最小のクライアント */
 class UsiEngine {
@@ -96,6 +98,7 @@ class UsiEngine {
     this.queue = Promise.resolve();   // 探索は1つずつ順番に
     this.ready = false;
     this.name = path.basename(cmdPath);
+    this.options = [];              // エンジンが持つオプション名
   }
 
   send(line) {
@@ -114,8 +117,12 @@ class UsiEngine {
     });
   }
 
+  hasOption(name) { return this.options.indexOf(name) >= 0; }
+
   handleLine(line) {
     if (/^id name /.test(line)) this.name = line.slice(8).trim();
+    const om = /^option name (\S+)/.exec(line);
+    if (om) this.options.push(om[1]);
     for (const w of this.waiters.slice()) {
       let hit = null;
       try { hit = w.test(line); } catch (e) { hit = null; }
@@ -149,6 +156,9 @@ class UsiEngine {
     await this.waitFor((l) => l.trim() === 'usiok', 20000);
     this.send('setoption name Threads value ' + ENGINE_THREADS);
     if (ENGINE_DEPTH > 0) this.send('setoption name DepthLimit value ' + ENGINE_DEPTH);
+    if (this.hasOption('FV_SCALE')) {
+      this.send('setoption name FV_SCALE value ' + ENGINE_FV_SCALE);
+    }
     this.send('isready');
     await this.waitFor((l) => l.trim() === 'readyok', 120000);
     this.send('usinewgame');
@@ -411,7 +421,8 @@ server.listen(PORT, '127.0.0.1', () => {
       console.log('                               ' + enginePath);
       console.log('                               1手 ' + ENGINE_BYOYOMI + 'ms' +
         (ENGINE_DEPTH > 0 ? ' / 深さ上限 ' + ENGINE_DEPTH : ' / 深さ無制限') +
-        ' / ' + ENGINE_THREADS + 'スレッド');
+        ' / ' + ENGINE_THREADS + 'スレッド' +
+        (engine.hasOption('FV_SCALE') ? ' / FV_SCALE ' + ENGINE_FV_SCALE : ''));
     }).catch(function (e) {
       console.error('思考エンジンを使えません: ' + e.message);
       engine = null;
