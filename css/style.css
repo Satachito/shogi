@@ -538,3 +538,6 @@ select, input[type="password"], input[type="text"] {
 
 /* 解析の出どころを小さく添える */
 .eval-src { font-size: 11px; color: var(--text-dim); }
+
+/* ヒントをそのまま指すボタン */
+.hint-play { margin-top: 8px; }

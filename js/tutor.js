@@ -218,17 +218,27 @@
    * 次の一手のヒント。
    * 返り値: { move, title, text, urgent }
    */
+  /**
+   * ヒント。opts.bestMove（外部エンジンの最善手）が渡されたときは、
+   * **必ずその手を返す**。内蔵エンジンは、それが無いときの代用にしか使わない。
+   * 局面の様子（詰み・王手・駒の取り合い）は、その手を説明する言葉に使う。
+   */
   function hint(pos, opts) {
     opts = opts || {};
     var me = pos.turn;
+    var given = (typeof opts.bestMove === 'number') ? opts.bestMove : null;
 
     // 1. 詰みがあるか
     var mate1 = S.findMate(pos, 1);
     if (mate1) {
-      return { move: mate1, title: '詰みがあります！', urgent: true,
+      return { move: given !== null ? given : mate1, title: '詰みがあります！', urgent: true,
         text: '相手の玉を詰ませる手が1手あります。玉の逃げ道と、味方の駒の支えを確認してみてください。' };
     }
-    var mate3 = S.findMate(pos, 3);
+    if (opts.mateIn > 0) {
+      return { move: given, title: opts.mateIn + '手で詰みます！', urgent: true,
+        text: '王手を続けて逃げ道を消していけば詰みます。まずは玉の退路を狭める王手から。' };
+    }
+    var mate3 = given === null ? S.findMate(pos, 3) : null;
     if (mate3) {
       return { move: mate3, title: '3手で詰みます！', urgent: true,
         text: '王手を続けて逃げ道を消していけば詰みます。まずは玉の退路を狭める王手から。' };
@@ -236,36 +246,40 @@
 
     // 2. 王手されている
     if (S.inCheck(pos, me)) {
-      var esc = AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 500 });
-      return { move: esc.move, title: 'まず王手を受けましょう', urgent: true,
+      var esc = given !== null ? given
+        : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 500 }).move;
+      return { move: esc, title: 'まず王手を受けましょう', urgent: true,
         text: '「逃げる」「取る」「合駒する」の3つのどれかで王手を解消します。解消できないと負けです。' };
     }
 
-    // 3. タダで取れる駒
+    // 3. タダで取れる駒（エンジンがそれを勧めているときだけ「取れます」と言う）
     var free = findFreeCaptures(pos);
-    if (free.length && free[0].gain >= 400) {
-      return { move: free[0].move, title: 'タダで取れる駒があります',
+    if (free.length && free[0].gain >= 400 &&
+        (given === null || S.mvTo(given) === S.mvTo(free[0].move))) {
+      return { move: given !== null ? given : free[0].move, title: 'タダで取れる駒があります',
         text: S.nameOf(free[0].victim) + 'が取れます。取り返される心配もありません。' };
     }
 
     // 4. タダで取られそうな駒
     var hang = findHanging(pos, me, 400);
     if (hang.length) {
-      var save = AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 600 });
-      return { move: save.move, title: '取られそうな駒があります',
+      var save = given !== null ? given
+        : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 600 }).move;
+      return { move: save, title: '取られそうな駒があります',
         text: S.sqName(hang[0].sq) + 'の' + S.nameOf(hang[0].piece) +
           'が狙われています。逃げるか、ひも（守り）を付けるか、取り返せる形にしましょう。' };
     }
 
     // 5. ふつうの局面での有力手
-    var best = AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 700 });
-    if (!best.move) return { move: null, title: '指す手がありません', text: '詰んでいます。' };
+    var best = given !== null ? given
+      : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 700 }).move;
+    if (best === null) return { move: null, title: '指す手がありません', text: '詰んでいます。' };
     var title = pos.ply < 14 ? '序盤の組み立て' : '有力な手';
-    var text = describeMove(pos, best.move) + '手です。';
+    var text = describeMove(pos, best) + '手です。';
     if (pos.ply < 14) {
       text += ' 序盤は「大駒の道を開ける」「玉を囲う」「攻めの形を作る」の3つを意識しましょう。';
     }
-    return { move: best.move, title: title, text: text };
+    return { move: best, title: title, text: text };
   }
 
   /** 局面についての短いコメント（手番の人へ） */

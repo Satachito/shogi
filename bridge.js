@@ -405,7 +405,17 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && route === '/bridge-ping') {
-    sendText(res, 200, 'ok');
+    // 相手の思考設定も返す。アプリはこれを見て、
+    // ヒントの解析時間を「相手より長く」に合わせる
+    sendJson(res, 200, {
+      ok: true,
+      engine: engine && engine.ready ? {
+        name: engine.name,
+        byoyomi: ENGINE_BYOYOMI,
+        depth: ENGINE_DEPTH,
+        analyzeMs: ANALYZE_MS
+      } : null
+    });
     return;
   }
 

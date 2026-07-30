@@ -533,10 +533,21 @@
     }
   }
 
+  /**
+   * ヒントの解析時間。相手の思考時間より必ず長くする。
+   * ヒント側は深さ無制限で読ませているので、時間で上回っていれば
+   * 「ヒント通りに指せば相手より良い手を指している」状態になる。
+   */
+  function hintMs() {
+    var e = bridge.engine;
+    var opp = (e && Number(e.byoyomi)) || 1000;
+    return Math.max(2000, Math.round(opp * 2.5));
+  }
+
   function showHint() {
     G.busy = true; render();
     var gen = G.gen;
-    analyze(G.pos, { ms: 700, multipv: 1 }).then(function (d) {
+    analyze(G.pos, { ms: hintMs(), multipv: 1 }).then(function (d) {
       if (gen !== G.gen) return;
       G.busy = false;
       pushHint(d, false);
@@ -549,21 +560,57 @@
    */
   function pushHint(d, auto) {
     var given = d ? usiToMove(G.pos, d.bestmove) : null;
-    var h = T.hint(G.pos, { bestMove: given });
-    if (d && given !== null) {
-      h.text += '（やねうら王の推奨・深さ' + d.depth + '）';
-    }
-    if (h.move) {
+    var top = d && d.candidates && d.candidates[0];
+    var mateIn = (top && typeof top.mate === 'number' && top.mate > 0) ? top.mate : 0;
+    var h = T.hint(G.pos, { bestMove: given, mateIn: mateIn });
+    if (h.move !== null && h.move !== undefined) {
       G.hilite = [S.mvTo(h.move)];
       if (!S.mvIsDrop(h.move)) G.hilite.push(S.mvFrom(h.move));
     }
-    pushMsg({
+
+    var has = (h.move !== null && h.move !== undefined);
+    var lines = [esc(h.text)];
+    if (has) {
+      // 迷わないように、指し手そのものを見せる（駒・行き先・移動元まで）
+      lines.push('<b>この手です → <span class="mv">' +
+        esc(S.moveToKanji(G.pos, h.move, G.lastTo, { origin: true })) + '</span></b>' +
+        '（' + esc(S.moveToUsi(h.move)) + '・盤の青いマス）');
+    }
+    if (given !== null && d) {
+      lines.push('<span class="eval-src">' + esc(engineLabel() + 'が ' + d.depth +
+        '手先まで読んだ最善手です（' + hintMs() + 'ms・深さ無制限）。') + '</span>');
+    } else {
+      lines.push('<span class="eval-src">内蔵エンジンの手です（' +
+        'bridge.js を起動すると、もっと強い手を教えられます）。</span>');
+    }
+
+    var box = pushMsg({
       tone: h.urgent ? 'warn' : 'ok',
       title: auto ? '次の一手 — ' + h.title : h.title,
-      lines: [esc(h.text), h.move ? 'ヒント：<span class="mv">' + esc(S.sqName(S.mvTo(h.move))) + '</span> のあたりです（盤の青いマス）。' : '']
-        .filter(Boolean)
+      lines: lines
     });
+
+    // ヒント通りに指すためのボタン。押し間違いで別の手を指してしまうのを防ぐ
+    if (has) {
+      var key = S.toSfen(G.pos), gen = G.gen, mv = h.move;
+      var btn = el('button', 'btn primary hint-play', 'この手を指す');
+      btn.type = 'button';
+      btn.onclick = function () {
+        if (gen !== G.gen || G.over || G.busy) return;
+        if (S.toSfen(G.pos) !== key) { btn.disabled = true; btn.textContent = '局面が変わりました'; return; }
+        btn.disabled = true;
+        playMove(mv);
+      };
+      box.appendChild(btn);
+    }
     render();
+  }
+
+  /** 解析に使っているエンジンの名前（短く） */
+  function engineLabel() {
+    var e = bridge.engine;
+    if (!e || !e.name) return 'エンジン';
+    return String(e.name).split(' ')[0] === 'YaneuraOu' ? 'やねうら王' : String(e.name);
   }
 
   function mateCheck() {
@@ -771,14 +818,18 @@
   }
 
   // ---- ローカル連携（bridge.py を動かしているときだけ有効）
-  var bridge = { url: null };
+  var bridge = { url: null, engine: null };
 
   function detectBridge() {
     var base = (location.protocol === 'http:' || location.protocol === 'https:')
       ? location.origin : 'http://localhost:8765';
     fetch(base + '/bridge-ping', { cache: 'no-store' }).then(function (r) {
-      if (!r.ok) return;
+      if (!r.ok) return null;
+      return r.json().catch(function () { return null; });
+    }).then(function (info) {
+      if (info === undefined) return;
       bridge.url = base;
+      bridge.engine = (info && info.engine) || null;
       $('bridgeState').textContent = '● チャット連携ON（current-position.txt に自動保存）';
       pushBridge();
     }).catch(function () { /* 連携なしでも普通に使える */ });
@@ -863,7 +914,7 @@
     // 解析は1回で済ませて、ヒントと形勢の両方にその結果を使う
     var wantHint = settings.autoHint;
     var gen = G.gen;
-    analyzeCurrent(gen, wantHint ? 700 : 400).then(function (d) {
+    analyzeCurrent(gen, wantHint ? hintMs() : 400).then(function (d) {
       if (gen !== G.gen || G.over) return;
       if (wantHint && G.pos.turn === G.you) pushHint(d, true);
     });
