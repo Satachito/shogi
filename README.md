@@ -32,7 +32,7 @@ node bridge.js
 - **先手・後手を選べます**。後手を選ぶと相手から指し始め、盤はあなたの駒がいつも下側に来るように向きが変わります（筋・段の目盛りも一緒に反転します）。駒落ちのときは、駒を落とすのは常に相手のほうです。
 - 相手の強さは **入門・初級・中級・上級** の4段階。
 - **待った**（何度でも）、**ヒント**、**詰みチェック**（1手詰・3手詰を探します）つき。
-- 相手役を**外部のAIに任せる**こともできます（後述）。
+- 相手役を**外部のAIに任せる**こともできます。**やねうら王などのUSI対応ソフト**も使えます（後述）。
 
 ### 先生（右のパネル）
 指すたびに講評が出ます。組み込みの将棋エンジンで最善手と比べているので、
@@ -123,6 +123,63 @@ node bridge.js
 次の一手を決めて、その指し手だけを1行で /Users/…/SHOGI/com-move.txt に書いてください。
 指し手は USI 形式（例: 7g7f）で、ファイルに書くのは1行だけにしてください。
 ```
+
+---
+
+## 本物の将棋ソフト（やねうら王）を相手にする
+
+`bridge.js` は **USI**（将棋ソフト共通の規格）に対応したエンジンを相手役として使えます。
+実行ファイルを置いて `node bridge.js` を起動するだけで、自動で見つけて使います。
+
+```
+思考エンジン                →  YaneuraOu MaterialLv1 9.60git 64APPLEM1
+```
+
+と表示されれば成功です。あとは対局画面で「対局相手」を **外部AI** にすれば、
+相手の手をエンジンが指します。
+
+### エンジンの置き場所
+
+次の順に探します。`SHOGI_USI_ENGINE` で明示するのが確実です。
+
+1. 環境変数 `SHOGI_USI_ENGINE` のパス
+2. `engine/yaneuraou`（このフォルダの中）
+3. `../YaneuraOu/bin/yaneuraou-material`
+4. `../YaneuraOu/bin/yaneuraou-nnue`
+
+### 調整
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `SHOGI_USI_BYOYOMI` | 1000 | 1手の思考時間（ミリ秒） |
+| `SHOGI_USI_DEPTH` | 0 | 読みの深さ上限。0で無制限。小さくすると弱くなる |
+| `SHOGI_USI_THREADS` | 1 | 思考に使うスレッド数 |
+
+```bash
+# 少し弱くして、じっくり考えさせる
+SHOGI_USI_DEPTH=6 SHOGI_USI_BYOYOMI=2000 node bridge.js
+```
+
+### macOS (Apple Silicon) でのやねうら王のビルド
+
+```bash
+git clone --depth 1 https://github.com/yaneurao/YaneuraOu.git
+cd YaneuraOu/source
+make -j$(sysctl -n hw.ncpu) normal \
+  TARGET_CPU=APPLEM1 \
+  YANEURAOU_EDITION=YANEURAOU_ENGINE_MATERIAL \
+  COMPILER="clang++ -isysroot $(xcrun --show-sdk-path)"
+```
+
+**`-isysroot` が要ります。** Makefile は `APPLEM1` 指定時に `-target arm64-apple-macos11`
+を渡しますが `-isysroot` を付けないため、clang が macOS SDK を見つけられず
+`'cstring' file not found` で全ファイルのコンパイルに失敗します。
+
+- M1〜M4 すべて `TARGET_CPU=APPLEM1` を指定します
+- **エディションを変えるときは先に `make clean`。** しないとオブジェクトが再利用され、
+  指定と違うものができます
+- `YANEURAOU_ENGINE_MATERIAL`（駒得のみ）は**評価関数ファイル不要でそのまま動きます**。
+  `YANEURAOU_ENGINE_NNUE` は別途 `nn.bin`（数十〜数百MB）を `eval/` に置く必要があります
 
 ---
 

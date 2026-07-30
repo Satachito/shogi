@@ -1079,7 +1079,8 @@
 
   function pollExternal(gen) {
     if (gen !== G.gen || !G.waiting || !bridge.url) return;
-    fetch(bridge.url + '/move?since=' + G.moveSeq, { cache: 'no-store' })
+    var q = '/move?since=' + G.moveSeq + '&sfen=' + encodeURIComponent(S.toSfen(G.pos));
+    fetch(bridge.url + q, { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (gen !== G.gen || !G.waiting) return;
@@ -1108,8 +1109,11 @@
         tone: 'bad', who: '外部AI', title: '指し手を受け付けられません',
         lines: [esc(String(text)) + ' — ' + esc(why), '正しい手が届くまで待っています。']
       });
-      pushBridge();                     // 合法手リストを添えて出し直す
-      if (G.waiting) pollExternal(G.gen);
+      // ここで局面を再送すると、相手が同じ手を出し続けたときに
+      // 送受信のループになるので、送らずに待つだけにする
+      if (G.waiting) setTimeout(function (g) {
+        return function () { pollExternal(g); };
+      }(G.gen), 1500);
       return;
     }
     G.waiting = false;

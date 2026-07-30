@@ -20,6 +20,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const PORT = Number(process.env.SHOGI_PORT || 8765);
 const ROOT = __dirname;
@@ -34,7 +35,7 @@ const MAX_BODY = 64 * 1024;          // 局面テキストは数KBなので十�
  *   2. POST /move に指し手を送る        ← HTTPが叩けるツール向け
  * アプリは GET /move?since=N で新しい手が来ていないか見に行く。
  */
-let moveState = { seq: 0, move: '', at: null, source: '' };
+let moveState = { seq: 0, move: '', at: null, source: '', sfen: null };
 let fileStamp = null;
 
 function stampOf(target) {
@@ -42,10 +43,18 @@ function stampOf(target) {
   catch (e) { return null; }
 }
 
-function submitMove(text, source) {
+/**
+ * 指し手を受け取る。
+ * forSfen を渡すと「その局面のための手」として記録し、別の局面を持つアプリには
+ * 渡さない。ブラウザのタブが複数開いていても、手が混ざらないようにするため。
+ */
+function submitMove(text, source, forSfen) {
   const lines = String(text).split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   if (!lines.length) return false;
-  moveState = { seq: moveState.seq + 1, move: lines[0], at: timestamp(), source: source };
+  moveState = {
+    seq: moveState.seq + 1, move: lines[0], at: timestamp(),
+    source: source, sfen: forSfen || null
+  };
   console.log('  指し手を受け取り  ' + lines[0] + '   (' + source + ')');
   return true;
 }
@@ -56,6 +65,140 @@ function pickUpMoveFile() {
   if (st === null || st === fileStamp) return;
   fileStamp = st;
   try { submitMove(fs.readFileSync(MOVE_PATH, 'utf8'), 'com-move.txt'); } catch (e) {}
+}
+
+/*
+ * ---------------------------------------------------------------- USIエンジン
+ * やねうら王などの将棋ソフト（USI規格）を相手役として動かす。
+ *   SHOGI_USI_ENGINE   エンジンの実行ファイル（未指定なら候補から自動で探す）
+ *   SHOGI_USI_BYOYOMI  1手の思考時間ミリ秒（既定 1000）
+ *   SHOGI_USI_DEPTH    読みの深さ上限。0で無制限（既定 0）。小さくすると弱くなる
+ *   SHOGI_USI_THREADS  思考に使うスレッド数（既定 1）
+ */
+const ENGINE_CANDIDATES = [
+  process.env.SHOGI_USI_ENGINE,
+  path.join(ROOT, 'engine', 'yaneuraou'),
+  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-material'),
+  path.join(ROOT, '..', 'YaneuraOu', 'bin', 'yaneuraou-nnue')
+].filter(Boolean);
+
+const ENGINE_BYOYOMI = Number(process.env.SHOGI_USI_BYOYOMI || 1000);
+const ENGINE_DEPTH = Number(process.env.SHOGI_USI_DEPTH || 0);
+const ENGINE_THREADS = Number(process.env.SHOGI_USI_THREADS || 1);
+
+/** USIエンジンと1行ずつやりとりする最小のクライアント */
+class UsiEngine {
+  constructor(cmdPath) {
+    this.cmdPath = cmdPath;
+    this.proc = null;
+    this.buf = '';
+    this.waiters = [];
+    this.queue = Promise.resolve();   // 探索は1つずつ順番に
+    this.ready = false;
+    this.name = path.basename(cmdPath);
+  }
+
+  send(line) {
+    if (this.proc && this.proc.stdin.writable) this.proc.stdin.write(line + '\n');
+  }
+
+  /** test(line) が真を返す行が来るまで待つ */
+  waitFor(test, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const w = { test: test, resolve: resolve };
+      w.timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((x) => x !== w);
+        reject(new Error('エンジンの応答がありません（' + timeoutMs + 'ms）'));
+      }, timeoutMs);
+      this.waiters.push(w);
+    });
+  }
+
+  handleLine(line) {
+    if (/^id name /.test(line)) this.name = line.slice(8).trim();
+    for (const w of this.waiters.slice()) {
+      let hit = null;
+      try { hit = w.test(line); } catch (e) { hit = null; }
+      if (hit) {
+        clearTimeout(w.timer);
+        this.waiters = this.waiters.filter((x) => x !== w);
+        w.resolve(hit === true ? line : hit);
+      }
+    }
+  }
+
+  async start() {
+    this.proc = spawn(this.cmdPath, [], { cwd: path.dirname(this.cmdPath) });
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stdout.on('data', (chunk) => {
+      this.buf += chunk;
+      let i;
+      while ((i = this.buf.indexOf('\n')) >= 0) {
+        const line = this.buf.slice(0, i).replace(/\r$/, '');
+        this.buf = this.buf.slice(i + 1);
+        this.handleLine(line);
+      }
+    });
+    this.proc.on('error', (e) => console.error('  エンジン起動失敗: ' + e.message));
+    this.proc.on('exit', (code) => {
+      this.ready = false;
+      console.error('  エンジンが終了しました (code ' + code + ')');
+    });
+
+    this.send('usi');
+    await this.waitFor((l) => l.trim() === 'usiok', 20000);
+    this.send('setoption name Threads value ' + ENGINE_THREADS);
+    if (ENGINE_DEPTH > 0) this.send('setoption name DepthLimit value ' + ENGINE_DEPTH);
+    this.send('isready');
+    await this.waitFor((l) => l.trim() === 'readyok', 120000);
+    this.send('usinewgame');
+    this.ready = true;
+    return this.name;
+  }
+
+  /** SFENの局面から最善手をもらう。投了・勝ち宣言なら null */
+  bestMove(sfen) {
+    const run = async () => {
+      if (!this.ready) throw new Error('エンジンが準備できていません');
+      this.send('position sfen ' + sfen);
+      this.send('go byoyomi ' + ENGINE_BYOYOMI);
+      const line = await this.waitFor((l) => (/^bestmove /.test(l) ? l : null),
+        ENGINE_BYOYOMI + 60000);
+      const mv = line.trim().split(/\s+/)[1];
+      return (mv && mv !== 'resign' && mv !== 'win') ? mv : null;
+    };
+    const p = this.queue.then(run, run);
+    this.queue = p.catch(() => {});
+    return p;
+  }
+
+  quit() {
+    if (!this.proc) return;
+    try { this.send('quit'); } catch (e) {}
+    setTimeout(() => { try { this.proc.kill(); } catch (e) {} }, 300).unref();
+  }
+}
+
+let engine = null;
+
+function findEngine() {
+  for (const c of ENGINE_CANDIDATES) {
+    try { if (fs.statSync(c).isFile()) return c; } catch (e) {}
+  }
+  return null;
+}
+
+/** 局面テキストがCOMの手番を示していれば、エンジンに指させる */
+function maybeEngineMove(text) {
+  if (!engine || !engine.ready) return;
+  if (!/^★ あなた（COM側/m.test(text)) return;
+  const m = /^SFEN: (.+)$/m.exec(text);
+  if (!m) return;
+  const sfen = m[1].trim();
+  engine.bestMove(sfen).then((mv) => {
+    if (!mv) { console.log('  エンジンは投了を選びました'); return; }
+    submitMove(mv, engine.name, sfen);
+  }).catch((e) => console.error('  エンジンの思考に失敗: ' + e.message));
 }
 
 const MIME = {
@@ -185,9 +328,15 @@ const server = http.createServer((req, res) => {
     const qs = req.url.split('?')[1] || '';
     const m = /(?:^|&)since=(\d+)/.exec(qs);
     const since = m ? Number(m[1]) : 0;
-    const fresh = moveState.seq > since;
+    const sm = /(?:^|&)sfen=([^&]*)/.exec(qs);
+    let wantSfen = null;
+    if (sm) { try { wantSfen = decodeURIComponent(sm[1]); } catch (e) {} }
+
+    // 局面が一致しない手は「まだ無い」として扱う（別のタブ用の手を渡さない）
+    const matches = !moveState.sfen || !wantSfen || moveState.sfen === wantSfen;
+    const fresh = moveState.seq > since && matches;
     const body = JSON.stringify({
-      seq: moveState.seq,
+      seq: fresh ? moveState.seq : since,
       move: fresh ? moveState.move : null,
       at: fresh ? moveState.at : null,
       source: fresh ? moveState.source : null
@@ -220,6 +369,7 @@ const server = http.createServer((req, res) => {
       try {
         savePosition(text);
         sendText(res, 200, 'ok');
+        maybeEngineMove(text);
       } catch (e) {
         console.error('  書き込みに失敗しました: ' + e.message);
         sendText(res, 500, 'write failed');
@@ -252,6 +402,24 @@ server.on('error', (e) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   fileStamp = stampOf(MOVE_PATH);   // 起動前に残っていた手は指さない
+
+  const enginePath = findEngine();
+  if (enginePath) {
+    engine = new UsiEngine(enginePath);
+    engine.start().then(function (name) {
+      console.log('思考エンジン                →  ' + name);
+      console.log('                               ' + enginePath);
+      console.log('                               1手 ' + ENGINE_BYOYOMI + 'ms' +
+        (ENGINE_DEPTH > 0 ? ' / 深さ上限 ' + ENGINE_DEPTH : ' / 深さ無制限') +
+        ' / ' + ENGINE_THREADS + 'スレッド');
+    }).catch(function (e) {
+      console.error('思考エンジンを使えません: ' + e.message);
+      engine = null;
+    });
+  } else {
+    console.log('思考エンジン                →  なし（手入力またはチャット経由で指してください）');
+  }
+
   console.log('将棋アプリを開いてください  →  http://localhost:' + PORT + '/');
   console.log('局面の書き出し先            →  ' + OUT_PATH);
   console.log('相手の指し手の受け口        →  com-move.txt  /  POST /move');
@@ -260,6 +428,7 @@ server.listen(PORT, '127.0.0.1', () => {
 
 process.on('SIGINT', () => {
   console.log('\n終了しました。');
+  if (engine) engine.quit();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 500).unref();
 });
