@@ -19,11 +19,12 @@
   function soon(fn) { setTimeout(fn, 30); }
 
   // ------------------------------------------------------------ 設定
-  var settings = { sound: true, review: true };
+  var settings = { sound: true, review: true, autoHint: true };
   try {
     var saved = JSON.parse(localStorage.getItem('shogi.settings') || '{}');
     if (typeof saved.sound === 'boolean') settings.sound = saved.sound;
     if (typeof saved.review === 'boolean') settings.review = saved.review;
+    if (typeof saved.autoHint === 'boolean') settings.autoHint = saved.autoHint;
   } catch (e) {}
   function saveSettings() {
     try { localStorage.setItem('shogi.settings', JSON.stringify(settings)); } catch (e) {}
@@ -537,24 +538,32 @@
     var gen = G.gen;
     analyze(G.pos, { ms: 700, multipv: 1 }).then(function (d) {
       if (gen !== G.gen) return;
-      var given = d ? usiToMove(G.pos, d.bestmove) : null;
-      var h = T.hint(G.pos, { bestMove: given });
-      if (d && given !== null) {
-        h.text += '（やねうら王の推奨・深さ' + d.depth + '）';
-      }
       G.busy = false;
-      if (h.move) {
-        G.hilite = [S.mvTo(h.move)];
-        if (!S.mvIsDrop(h.move)) G.hilite.push(S.mvFrom(h.move));
-      }
-      pushMsg({
-        tone: h.urgent ? 'warn' : 'ok',
-        title: h.title,
-        lines: [esc(h.text), h.move ? 'ヒント：<span class="mv">' + esc(S.sqName(S.mvTo(h.move))) + '</span> のあたりです（盤の青いマス）。' : '']
-          .filter(Boolean)
-      });
-      render();
+      pushHint(d, false);
     });
+  }
+
+  /**
+   * 解析結果（サーバーが使えないときは null）からヒントを作って先生パネルに出し、
+   * 狙いのマスを盤に光らせる。auto は相手の手のあとに自動で出したとき。
+   */
+  function pushHint(d, auto) {
+    var given = d ? usiToMove(G.pos, d.bestmove) : null;
+    var h = T.hint(G.pos, { bestMove: given });
+    if (d && given !== null) {
+      h.text += '（やねうら王の推奨・深さ' + d.depth + '）';
+    }
+    if (h.move) {
+      G.hilite = [S.mvTo(h.move)];
+      if (!S.mvIsDrop(h.move)) G.hilite.push(S.mvFrom(h.move));
+    }
+    pushMsg({
+      tone: h.urgent ? 'warn' : 'ok',
+      title: auto ? '次の一手 — ' + h.title : h.title,
+      lines: [esc(h.text), h.move ? 'ヒント：<span class="mv">' + esc(S.sqName(S.mvTo(h.move))) + '</span> のあたりです（盤の青いマス）。' : '']
+        .filter(Boolean)
+    });
+    render();
   }
 
   function mateCheck() {
@@ -849,7 +858,15 @@
     if (checkEnd()) return;
     var notes = T.comment(G.pos, G.you === S.SENTE);
     if (notes.length > 1) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
-    refreshEval();
+
+    // 相手が指したら形勢を更新し、続けて「次の一手」を出す。
+    // 解析は1回で済ませて、ヒントと形勢の両方にその結果を使う
+    var wantHint = settings.autoHint;
+    var gen = G.gen;
+    analyzeCurrent(gen, wantHint ? 700 : 400).then(function (d) {
+      if (gen !== G.gen || G.over) return;
+      if (wantHint && G.pos.turn === G.you) pushHint(d, true);
+    });
   }
 
   /**
@@ -998,22 +1015,30 @@
       .catch(function () { return { ms: 400 }; });
   }
 
-  /** サーバーに形勢を問い合わせ、返ってきたら棋譜タブを描き直す */
-  function refreshEval() {
-    if (!bridge.url || G.over) return;
-    var key = S.toSfen(G.pos), gen = G.gen;
-    analyze(G.pos, { ms: 400, multipv: 1 }).then(function (d) {
-      if (!d || gen !== G.gen || S.toSfen(G.pos) !== key) return;
+  /**
+   * いまの局面をサーバーに解析させ、形勢バーを更新して結果を返す。
+   * 局面が変わっていたら（別の手が指された・新規対局など）null を返す。
+   */
+  function analyzeCurrent(gen, ms) {
+    if (!bridge.url || G.over) return Promise.resolve(null);
+    var key = S.toSfen(G.pos);
+    return analyze(G.pos, { ms: ms || 400, multipv: 1 }).then(function (d) {
+      if (!d || gen !== G.gen || S.toSfen(G.pos) !== key) return null;
       var cp = cpOf(d.candidates[0]);
-      if (cp === null) return;
-      // 手番側から見た点数 → 先手から見た点数
-      evalCache = {
-        key: key, depth: d.depth, from: 'サーバー',
-        senteCp: (G.pos.turn === S.SENTE) ? cp : -cp
-      };
-      renderKifu();
+      if (cp !== null) {
+        // 手番側から見た点数 → 先手から見た点数
+        evalCache = {
+          key: key, depth: d.depth, from: 'サーバー',
+          senteCp: (G.pos.turn === S.SENTE) ? cp : -cp
+        };
+        renderKifu();
+      }
+      return d;
     });
   }
+
+  /** サーバーに形勢を問い合わせ、返ってきたら棋譜タブを描き直す */
+  function refreshEval() { analyzeCurrent(G.gen, 400); }
 
   /** 画面を描き直す */
   function refresh() { render(); }
@@ -1021,6 +1046,7 @@
   function openSettings() {
     $('soundChk').checked = settings.sound;
     $('reviewChk').checked = settings.review;
+    $('autoHintChk').checked = settings.autoHint;
     $('apiKeyInput').value = C.getKey();
     var sel = $('modelSel');
     clear(sel);
@@ -1036,6 +1062,7 @@
   function saveSettingsUI() {
     settings.sound = $('soundChk').checked;
     settings.review = $('reviewChk').checked;
+    settings.autoHint = $('autoHintChk').checked;
     saveSettings();
     C.setKey($('apiKeyInput').value.trim());
     C.setModel($('modelSel').value);
