@@ -89,6 +89,7 @@
       var cls = 'sq';
       if (this.stars[idx]) cls += ' star';
       if (sq === st.lastFrom || sq === st.lastTo) cls += ' last';
+      if (sq === st.lastTo) cls += ' last-to';
       if (st.hilite && st.hilite.indexOf(sq) >= 0) cls += ' hilite';
       if (sq === st.checkSq) cls += ' check';
       if (sq === st.selected) cls += ' selected';
@@ -196,7 +197,7 @@
     counts: {},
     you: S.SENTE,         // あなたが持つ側（先手 or 後手）
     gen: 0,               // 局面を差し替えるたびに増やす（予約済みのAIの手を捨てるため）
-    opponent: 'engine',   // 'engine' = 内蔵エンジン / 'external' = 外部AI
+    // 相手の手はつねに bridge.js 経由で受け取る（USIエンジン・AI・手入力）
     moveSeq: 0,           // 外部AIから受け取った指し手の通し番号
     waiting: false        // 外部AIの手を待っている最中か
   };
@@ -213,14 +214,11 @@
 
   function posKey(pos) { return S.toSfen(pos).replace(/ \d+$/, ''); }
 
-  function newGame(handicap, level, side, opponent) {
+  function newGame(handicap, side) {
     G.gen++;
     G.waiting = false;
     G.handicap = handicap || G.handicap;
-    G.level = (level === undefined) ? G.level : level;
     G.you = (side === undefined) ? G.you : side;
-    G.opponent = opponent || G.opponent;
-    applyOpponentMode();
     // 駒を落とすのは相手（上手）のほう
     G.pos = S.newGame(G.handicap, 1 - G.you);
     G.history = [];
@@ -269,9 +267,7 @@
       localStorage.setItem('shogi.game', JSON.stringify({
         sfen: S.toSfen(G.pos),
         handicap: G.handicap,
-        level: G.level,
         you: G.you,
-        opponent: G.opponent,
         kifu: G.history.map(function (h) { return h.kanji; }),
         over: G.over
       }));
@@ -285,9 +281,7 @@
       if (!d || !d.sfen) return false;
       G.pos = S.fromSfen(d.sfen);
       G.handicap = d.handicap || 'even';
-      G.level = (d.level === undefined) ? 2 : d.level;
       G.you = (d.you === S.GOTE) ? S.GOTE : S.SENTE;
-      G.opponent = (d.opponent === 'external') ? 'external' : 'engine';
       G.over = d.over || null;
       G.history = (d.kifu || []).map(function (k) { return { kanji: k, undo: null }; });
       G.counts = {};
@@ -458,19 +452,7 @@
 
   function aiTurn() {
     if (G.over) { G.busy = false; render(); return; }
-    if (G.opponent === 'external') { waitForExternal(); return; }
-    var res = AI.think(G.pos, { level: G.level });
-    if (!res.move) { G.busy = false; checkEnd(); return; }
-    applyMove(res.move);
-    G.busy = false;
-    render();
-    saveGame();
-    if (checkEnd()) return;
-    // 王手されている・大駒が危ないなど、気づいてほしいことだけ知らせる
-    var notes = T.comment(G.pos, G.you === S.SENTE);
-    if (notes.length > 1) {
-      pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
-    }
+    waitForExternal();
   }
 
   function checkEnd() {
@@ -944,7 +926,7 @@
     if (G.over) lines.push('結果: ' + G.over.text);
 
     // 外部AIに相手役を任せているときは、指し方の説明と合法手を添える
-    if (G.opponent === 'external' && !G.over && G.pos.turn !== G.you) {
+    if (!G.over && G.pos.turn !== G.you) {
       var comSide = (G.pos.turn === S.SENTE) ? '先手' : '後手';
       lines.push('');
       lines.push('★ あなた（COM側 = ' + comSide + '）の手番です。次の一手を指してください。');
@@ -1120,12 +1102,69 @@
     var kanji = applyMove(r.move);
     G.busy = false;
     render();
+    animateOpponentMove(G.lastFrom, G.lastTo);
     saveGame();
     extMsg('相手が ' + kanji + ' と指しました（' + source + '）', false);
     pushMsg({ tone: 'ok', who: '相手（外部AI）', title: kanji, lines: ['受け取り元: ' + esc(source)] });
     if (checkEnd()) return;
     var notes = T.comment(G.pos, G.you === S.SENTE);
     if (notes.length > 1) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
+  }
+
+  /**
+   * 相手の指した駒を、移動元から移動先へ滑らせて見せる。
+   * 盤は毎回作り直しているので、描画後に「移動先にある駒」を
+   * いったん移動元の位置に置いてから、元の位置へ戻す形で動かす。
+   */
+  function animateOpponentMove(fromSq, toSq) {
+    if (toSq === undefined || toSq < 0) return;
+    var toCell = boardView.cells[boardView.at(toSq)];
+    if (!toCell) return;
+
+    // 指したマスを一瞬光らせる（駒が無い場合でも分かるように）
+    toCell.classList.remove('just-moved');
+    void toCell.offsetWidth;              // アニメーションをやり直させる
+    toCell.classList.add('just-moved');
+
+    var pc = toCell.querySelector('.pc');
+    if (!pc) return;
+    // 後手の駒は回転しているので、その指定を消さないようにする
+    var base = pc.classList.contains('gote') ? ' rotate(180deg)' : '';
+    pc.classList.add('moving');
+
+    if (fromSq === undefined || fromSq < 0) {
+      // 持ち駒を打った場合は、ふわっと現れる
+      pc.style.transition = 'none';
+      pc.style.transform = 'scale(.3)' + base;
+      pc.style.opacity = '0';
+      requestAnimationFrame(function () {
+        pc.style.transition = 'transform .28s ease-out, opacity .28s ease-out';
+        pc.style.transform = 'scale(1)' + base;
+        pc.style.opacity = '1';
+      });
+    } else {
+      var fromCell = boardView.cells[boardView.at(fromSq)];
+      if (!fromCell) { pc.classList.remove('moving'); return; }
+      var dx = fromCell.offsetLeft - toCell.offsetLeft;
+      var dy = fromCell.offsetTop - toCell.offsetTop;
+      pc.style.transition = 'none';
+      pc.style.transform = 'translate(' + dx + 'px,' + dy + 'px)' + base;
+      requestAnimationFrame(function () {
+        pc.style.transition = 'transform .32s cubic-bezier(.2,.7,.3,1)';
+        pc.style.transform = 'translate(0,0)' + base;
+      });
+    }
+
+    // 終わったらインラインの指定を消して、ホバーなどの動きを元に戻す
+    var done = function () {
+      pc.style.transition = '';
+      pc.style.transform = '';
+      pc.style.opacity = '';
+      pc.classList.remove('moving');
+      pc.removeEventListener('transitionend', done);
+    };
+    pc.addEventListener('transitionend', done);
+    setTimeout(done, 700);
   }
 
   function extMsg(text, isError) {
@@ -1145,19 +1184,11 @@
     box.value = '';
   }
 
-  function applyOpponentMode() {
-    $('externalRow').classList.toggle('hidden', G.opponent !== 'external');
-    $('levelSel').disabled = (G.opponent === 'external');
-    if (G.opponent !== 'external') { G.waiting = false; extMsg('', false); }
-  }
-
   /** 画面で選ばれている手合割・手番・強さで対局を始める */
   function startNewGame() {
     newGame(
       $('handicapSel').value,
-      parseInt($('levelSel').value, 10),
-      parseInt($('sideSel').value, 10) === S.GOTE ? S.GOTE : S.SENTE,
-      $('oppSel').value === 'external' ? 'external' : 'engine'
+      parseInt($('sideSel').value, 10) === S.GOTE ? S.GOTE : S.SENTE
     );
   }
 
@@ -1210,22 +1241,13 @@
       o.value = k;
       hs.appendChild(o);
     });
-    var ls = $('levelSel');
-    AI.LEVELS.forEach(function (lv, i) {
-      var o = el('option', null, lv.label);
-      o.value = i;
-      ls.appendChild(o);
-    });
-
     if (!loadGame()) {
       G.pos = S.newGame('even');
       G.counts[posKey(G.pos)] = 1;
     }
     hs.value = G.handicap;
-    ls.value = G.level;
     $('sideSel').value = String(G.you);
-    $('oppSel').value = G.opponent;
-    applyOpponentMode();
+    $('externalRow').classList.remove('hidden');
     applyOrientation();
 
     // イベント
@@ -1254,19 +1276,6 @@
       finish('lose', 'あなたの投了で終局しました。');
     });
 
-    $('oppSel').addEventListener('change', function () {
-      G.opponent = this.value === 'external' ? 'external' : 'engine';
-      applyOpponentMode();
-      saveGame();
-      pushMsg({
-        tone: 'ok', title: '対局相手を切り替えました',
-        lines: [G.opponent === 'external'
-          ? 'bridge.js 経由で相手の手を受け取ります（USIエンジン・com-move.txt・POST /move・下の入力欄）。次の相手番から有効です。'
-          : 'このアプリに内蔵した簡易エンジンが指します（序盤が苦手です）。']
-      });
-      // すでに相手の手番なら、その場で待ち受けを始める
-      if (!G.over && G.pos.turn !== G.you && G.opponent === 'external') waitForExternal();
-    });
     $('comMoveBtn').addEventListener('click', submitManualMove);
     $('comMoveInput').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') submitManualMove();

@@ -596,3 +596,21 @@ select, input[type="password"], input[type="text"] {
 .ext-state { font-size: 11.5px; color: var(--accent-2); flex-basis: 100%; }
 .ext-state:empty { display: none; }
 .ext-state.err { color: var(--bad); }
+
+/* ---------------------------------------------- 相手の指し手を見せる */
+/* 動いている駒を最前面に */
+.pc.moving { z-index: 6; }
+
+/* 相手が指したマスを一瞬光らせる */
+.sq.just-moved {
+  animation: justMoved 1.3s ease-out;
+}
+@keyframes justMoved {
+  0%   { box-shadow: inset 0 0 0 3px var(--accent); background: #d98c3f55; }
+  60%  { box-shadow: inset 0 0 0 3px var(--accent); background: #d98c3f22; }
+  100% { box-shadow: inset 0 0 0 3px transparent; background: transparent; }
+}
+
+/* 直前の手のマス（移動元は控えめ、移動先はやや強く） */
+.sq.last { background: #ffd97a24; }
+.sq.last-to { background: #ffd97a40; }
