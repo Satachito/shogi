@@ -1261,8 +1261,8 @@
       pushMsg({
         tone: 'ok', title: '対局相手を切り替えました',
         lines: [G.opponent === 'external'
-          ? '相手の手は外部AI（com-move.txt / POST /move / 下の入力欄）から受け取ります。次の相手番から有効です。'
-          : '相手の手は内蔵エンジンが指します。']
+          ? 'bridge.js 経由で相手の手を受け取ります（USIエンジン・com-move.txt・POST /move・下の入力欄）。次の相手番から有効です。'
+          : 'このアプリに内蔵した簡易エンジンが指します（序盤が苦手です）。']
       });
       // すでに相手の手番なら、その場で待ち受けを始める
       if (!G.over && G.pos.turn !== G.you && G.opponent === 'external') waitForExternal();
