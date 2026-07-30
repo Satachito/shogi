@@ -87,6 +87,9 @@ const ENGINE_DEPTH = Number(process.env.SHOGI_USI_DEPTH || 0);
 const ENGINE_THREADS = Number(process.env.SHOGI_USI_THREADS || 1);
 // 評価関数ごとに推奨値がある。Háo は 20（エンジン既定は 16）
 const ENGINE_FV_SCALE = Number(process.env.SHOGI_USI_FV_SCALE || 20);
+// 講評・ヒント用の解析。対局相手より強く読ませたいので別枠にしている
+const ANALYZE_MS = Number(process.env.SHOGI_USI_ANALYZE_MS || 700);
+const ENGINE_HASH = Number(process.env.SHOGI_USI_HASH || 256);
 
 /** USIエンジンと1行ずつやりとりする最小のクライアント */
 class UsiEngine {
@@ -155,7 +158,7 @@ class UsiEngine {
     this.send('usi');
     await this.waitFor((l) => l.trim() === 'usiok', 20000);
     this.send('setoption name Threads value ' + ENGINE_THREADS);
-    if (ENGINE_DEPTH > 0) this.send('setoption name DepthLimit value ' + ENGINE_DEPTH);
+    if (this.hasOption('USI_Hash')) this.send('setoption name USI_Hash value ' + ENGINE_HASH);
     if (this.hasOption('FV_SCALE')) {
       this.send('setoption name FV_SCALE value ' + ENGINE_FV_SCALE);
     }
@@ -166,16 +169,81 @@ class UsiEngine {
     return this.name;
   }
 
+  /** 探索のたびに深さ上限とMultiPVを設定し直す */
+  setLimits(depth, multipv) {
+    if (this.hasOption('DepthLimit')) {
+      this.send('setoption name DepthLimit value ' + (depth > 0 ? depth : 0));
+    }
+    if (this.hasOption('MultiPV')) {
+      this.send('setoption name MultiPV value ' + (multipv || 1));
+    }
+  }
+
   /** SFENの局面から最善手をもらう。投了・勝ち宣言なら null */
   bestMove(sfen) {
     const run = async () => {
       if (!this.ready) throw new Error('エンジンが準備できていません');
+      this.setLimits(ENGINE_DEPTH, 1);      // 対局は弱めの設定で
       this.send('position sfen ' + sfen);
       this.send('go byoyomi ' + ENGINE_BYOYOMI);
       const line = await this.waitFor((l) => (/^bestmove /.test(l) ? l : null),
         ENGINE_BYOYOMI + 60000);
       const mv = line.trim().split(/\s+/)[1];
       return (mv && mv !== 'resign' && mv !== 'win') ? mv : null;
+    };
+    const p = this.queue.then(run, run);
+    this.queue = p.catch(() => {});
+    return p;
+  }
+
+  /**
+   * 局面を解析する。講評・ヒント・形勢表示に使う。
+   * 対局用の深さ上限は外して、じっくり読ませる。
+   * 返り値: { bestmove, candidates:[{ move, score, mate, pv, depth }], depth }
+   *   score は「手番側から見た」点数（centipawn）。mate は手数（正なら手番側の勝ち）
+   */
+  analyze(sfen, opts) {
+    opts = opts || {};
+    const ms = Number(opts.ms || ANALYZE_MS);
+    const multipv = Math.max(1, Math.min(8, Number(opts.multipv || 1)));
+    const run = async () => {
+      if (!this.ready) throw new Error('エンジンが準備できていません');
+      this.setLimits(0, multipv);           // 解析は深さ無制限
+      const found = {};                     // multipv番号 → 情報
+      let maxDepth = 0;
+      const collect = (line) => {
+        if (!/^info /.test(line) || !/ pv /.test(line)) return null;
+        const d = /\bdepth (\d+)/.exec(line);
+        const k = /\bmultipv (\d+)/.exec(line);
+        const cp = /\bscore cp (-?\d+)/.exec(line);
+        const mate = /\bscore mate ([+-]?\d+)/.exec(line);
+        const pv = /\bpv (.+)$/.exec(line);
+        if (!pv) return null;
+        const idx = k ? Number(k[1]) : 1;
+        if (d) maxDepth = Math.max(maxDepth, Number(d[1]));
+        found[idx] = {
+          move: pv[1].trim().split(/\s+/)[0],
+          score: cp ? Number(cp[1]) : null,
+          mate: mate ? Number(mate[1]) : null,
+          pv: pv[1].trim().split(/\s+/).slice(0, 8),
+          depth: d ? Number(d[1]) : 0
+        };
+        return null;                        // 待たずに集め続ける
+      };
+      this.waiters.push({ test: collect, timer: setTimeout(() => {}, 0) });
+      this.send('position sfen ' + sfen);
+      this.send('go byoyomi ' + ms);
+      const line = await this.waitFor((l) => (/^bestmove /.test(l) ? l : null), ms + 60000);
+      this.waiters = this.waiters.filter((w) => w.test !== collect);
+      const bm = line.trim().split(/\s+/)[1];
+      const candidates = Object.keys(found)
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => found[k]);
+      return {
+        bestmove: (bm && bm !== 'resign' && bm !== 'win') ? bm : null,
+        candidates: candidates,
+        depth: maxDepth
+      };
     };
     const p = this.queue.then(run, run);
     this.queue = p.catch(() => {});
@@ -230,6 +298,15 @@ function setCommonHeaders(res) {
   res.setHeader('Access-Control-Allow-Headers', 'content-type');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Cache-Control', 'no-store');
+}
+
+function sendJson(res, code, obj) {
+  const raw = Buffer.from(JSON.stringify(obj), 'utf8');
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': raw.length
+  });
+  res.end(raw);
 }
 
 function sendText(res, code, body) {
@@ -356,6 +433,24 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 講評・ヒント・形勢のための局面解析
+  if (req.method === 'POST' && route === '/analyze') {
+    readBody(req, MAX_BODY).then((body) => {
+      if (!engine || !engine.ready) { sendJson(res, 503, { error: 'エンジンがありません' }); return; }
+      let q;
+      try { q = JSON.parse(body); } catch (e) { sendJson(res, 400, { error: 'JSONではありません' }); return; }
+      if (!q || typeof q.sfen !== 'string' || !q.sfen.trim()) {
+        sendJson(res, 400, { error: 'sfen がありません' }); return;
+      }
+      engine.analyze(q.sfen.trim(), { ms: q.ms, multipv: q.multipv })
+        .then((r) => sendJson(res, 200, r))
+        .catch((e) => sendJson(res, 500, { error: e.message }));
+    }).catch((e) => {
+      if (!res.headersSent) sendJson(res, e && e.tooLarge ? 413 : 400, { error: 'bad body' });
+    });
+    return;
+  }
+
   // 外部AIが指し手を送ってくる
   if (req.method === 'POST' && route === '/move') {
     readBody(req, MAX_BODY).then((text) => {
@@ -434,6 +529,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('将棋アプリを開いてください  →  http://localhost:' + PORT + '/');
   console.log('局面の書き出し先            →  ' + OUT_PATH);
   console.log('相手の指し手の受け口        →  com-move.txt  /  POST /move');
+  console.log('局面の解析（講評・ヒント）  →  POST /analyze');
   console.log('止めるときは Ctrl-C');
 });
 

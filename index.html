@@ -11,18 +11,13 @@
 
 <header class="topbar">
   <h1 class="brand">将棋道場<span class="brand-sub">Claudeと学ぶ</span></h1>
-  <nav class="view-tabs" id="viewTabs">
-    <button type="button" data-view="play" class="on">対局</button>
-    <button type="button" data-view="lesson">レッスン</button>
-    <button type="button" data-view="tsume">詰将棋</button>
-  </nav>
   <button type="button" class="icon-btn" id="settingsBtn" title="設定" aria-label="設定">⚙</button>
 </header>
 
 <main id="main">
 
-  <!-- ============================ 対局 / 詰将棋 ============================ -->
-  <div class="game-layout" id="gameLayout">
+  <!-- ================================== 対局 ================================== -->
+  <div class="game-layout">
 
     <section class="board-area">
       <div class="hand hand-gote" id="handGote" aria-label="相手の持ち駒"></div>
@@ -70,19 +65,6 @@
           <span class="bridge-state" id="bridgeState"></span>
         </div>
       </div>
-
-      <div class="controls hidden" id="tsumeControls">
-        <div class="control-row">
-          <button type="button" class="btn" id="tsumePrev">前の問題</button>
-          <span class="tsume-label" id="tsumeLabel"></span>
-          <button type="button" class="btn" id="tsumeNext">次の問題</button>
-        </div>
-        <div class="control-row">
-          <button type="button" class="btn" id="tsumeReset">やり直す</button>
-          <button type="button" class="btn" id="tsumeHint">ヒント</button>
-          <button type="button" class="btn" id="tsumeAnswer">答えを見る</button>
-        </div>
-      </div>
     </section>
 
     <aside class="panel">
@@ -95,12 +77,6 @@
       <div class="pane" id="paneKifu"></div>
       <div class="pane" id="panePieces"></div>
     </aside>
-  </div>
-
-  <!-- ================================ レッスン ================================ -->
-  <div class="lesson-layout hidden" id="lessonLayout">
-    <nav class="lesson-nav" id="lessonNav"></nav>
-    <article class="lesson-body" id="lessonBody"></article>
   </div>
 
 </main>
@@ -136,7 +112,7 @@
     <p class="field-title">Claude 連携（任意）</p>
     <p class="hint">
       Anthropic の APIキーを入れると、本物の Claude が局面を解説してくれます。
-      入れなくても、このアプリの先生・レッスン・詰将棋はすべて使えます。
+      入れなくても、このアプリの先生（講評・ヒント・形勢）はすべて使えます。
     </p>
     <label class="field col">
       <span>APIキー</span>

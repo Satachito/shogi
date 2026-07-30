@@ -335,15 +335,22 @@
     s.textContent = parts.join(' ／ ');
   }
 
+  var evalCache = { key: '', senteCp: null, depth: 0, from: '内蔵' };
+
   function renderKifu() {
     clear(kifuPane);
     // 形勢は「あなたから見て」表示する（後手を持つときは符号が逆になる）
     var youSente = (G.you === S.SENTE);
-    var sc = AI.evaluate(G.pos);
+    var key = S.toSfen(G.pos);
+    var sc = (evalCache.key === key && evalCache.senteCp !== null)
+      ? evalCache.senteCp : AI.evaluate(G.pos);
     var mine = youSente ? sc : -sc;
     var pct = Math.max(2, Math.min(98, 50 + mine / 40));
     var wrap = el('div');
     wrap.appendChild(el('p', null, T.describeScore(sc, youSente)));
+    if (evalCache.key === key && evalCache.from === 'サーバー') {
+      wrap.appendChild(el('p', 'eval-src', 'やねうら王の評価（深さ' + evalCache.depth + '）'));
+    }
     var bar = el('div', 'eval-bar');
     var fill = el('i');
     fill.style.width = pct + '%';
@@ -440,12 +447,18 @@
     G.busy = true;
     render();
     var gen = G.gen;
-    soon(function () {
+    if (!settings.review) { soon(scheduleAi); return; }
+
+    // 指す前の局面と、指した後の局面をサーバーに解析させて損得を出す
+    reviewWithServer(before, m, gen).then(function (opts) {
       if (gen !== G.gen) return;
-      if (settings.review) {
-        var rv = T.reviewMove(before, m, { ms: 400 });
-        pushMsg({ tone: rv.tone, title: rv.title, lines: [ '<span class="mv">' + esc(rv.kanji) + '</span>' ].concat(rv.lines.map(esc)) });
-      }
+      var rv = T.reviewMove(before, m, opts);
+      pushMsg({
+        tone: rv.tone, title: rv.title,
+        lines: ['<span class="mv">' + esc(rv.kanji) + '</span>']
+          .concat(rv.lines.map(esc))
+          .concat(opts.note ? ['<span class="eval-src">' + esc(opts.note) + '</span>'] : [])
+      });
       scheduleAi();
     });
   }
@@ -522,9 +535,13 @@
   function showHint() {
     G.busy = true; render();
     var gen = G.gen;
-    soon(function () {
+    analyze(G.pos, { ms: 700, multipv: 1 }).then(function (d) {
       if (gen !== G.gen) return;
-      var h = T.hint(G.pos);
+      var given = d ? usiToMove(G.pos, d.bestmove) : null;
+      var h = T.hint(G.pos, { bestMove: given });
+      if (d && given !== null) {
+        h.text += '（やねうら王の推奨・深さ' + d.depth + '）';
+      }
       G.busy = false;
       if (h.move) {
         G.hilite = [S.mvTo(h.move)];
@@ -628,283 +645,6 @@
     if (!guideState.prom) d.appendChild(el('p', null, g.promo));
     d.appendChild(el('div', 'tip', '💡 ' + g.tip));
     container.appendChild(d);
-  }
-
-  // ------------------------------------------------------------ レッスン
-  var lessonIndex = 0;
-
-  function renderLessonNav() {
-    var nav = $('lessonNav');
-    clear(nav);
-    T.LESSONS.forEach(function (l, i) {
-      var b = el('button', i === lessonIndex ? 'on' : null);
-      b.appendChild(document.createTextNode(l.title));
-      b.appendChild(el('small', null, l.summary));
-      b.addEventListener('click', function () { lessonIndex = i; renderLesson(); });
-      nav.appendChild(b);
-    });
-  }
-
-  function renderLesson() {
-    renderLessonNav();
-    var body = $('lessonBody');
-    clear(body);
-    var lesson = T.LESSONS[lessonIndex];
-    body.appendChild(el('h2', null, lesson.title));
-
-    lesson.blocks.forEach(function (b) {
-      if (b.t === 'p') {
-        var p = el('p'); p.innerHTML = b.text; body.appendChild(p);
-      } else if (b.t === 'ul') {
-        var ul = el('ul');
-        b.items.forEach(function (it) { var li = el('li'); li.innerHTML = it; ul.appendChild(li); });
-        body.appendChild(ul);
-      } else if (b.t === 'note') {
-        var n = el('div', 'note'); n.innerHTML = b.text; body.appendChild(n);
-      } else if (b.t === 'table') {
-        var tbl = el('table', 'value-table');
-        b.rows.forEach(function (row) {
-          var tr = el('tr');
-          row.forEach(function (cell) { tr.appendChild(el('td', null, cell)); });
-          tbl.appendChild(tr);
-        });
-        body.appendChild(tbl);
-      } else if (b.t === 'pieces') {
-        var box = el('div');
-        renderPieceGuide(box);
-        body.appendChild(box);
-      } else if (b.t === 'board') {
-        body.appendChild(demoBoard(b));
-      }
-      if (b.t === 'note' || b.t === 'board') body.appendChild(el('hr'));
-    });
-  }
-
-  /** レッスン中の触れる盤面 */
-  function demoBoard(spec) {
-    var wrap = el('div', 'demo');
-    var pos = S.fromSfen(spec.sfen);
-    var holder = el('div', 'demo-board-wrap');
-    var frame = el('div', 'board-frame');
-    var boardEl = el('div', 'board');
-    frame.appendChild(boardEl);
-    holder.appendChild(frame);
-
-    var state = { sel: -1, dropType: -1, targets: {} };
-    var handRoot = null;
-    var view = new BoardView(boardEl, function (sq) {
-      if (state.targets[sq]) { state.sel = -1; state.dropType = -1; state.targets = {}; draw(); return; }
-      var p = pos.board[sq];
-      state.targets = {}; state.dropType = -1;
-      if (p !== S.EMPTY && S.ownerOf(p) === pos.turn) {
-        state.sel = sq;
-        S.movesFrom(pos, sq).forEach(function (m) { state.targets[S.mvTo(m)] = true; });
-      } else { state.sel = -1; }
-      draw();
-    });
-
-    function draw() {
-      view.render(pos, {
-        targets: state.targets, selected: state.sel, mover: pos.turn, bottom: S.SENTE
-      });
-      if (handRoot) {
-        renderHand(handRoot, pos, pos.turn, {
-          selected: state.dropType,
-          onPick: function (t) {
-            state.sel = -1; state.targets = {};
-            state.dropType = (state.dropType === t) ? -1 : t;
-            if (state.dropType >= 0) {
-              S.dropsOf(pos, t).forEach(function (m) { state.targets[S.mvTo(m)] = true; });
-            }
-            draw();
-          }
-        });
-      }
-    }
-
-    if (spec.hand) {
-      handRoot = el('div', 'hand hand-sente');
-      wrap.appendChild(holder);
-      wrap.appendChild(handRoot);
-    } else {
-      wrap.appendChild(holder);
-    }
-    draw();
-
-    if (spec.from) {
-      var sq = S.parseSqName(spec.from);
-      state.sel = sq;
-      S.movesFrom(pos, sq).forEach(function (m) { state.targets[S.mvTo(m)] = true; });
-      draw();
-    }
-    if (spec.caption) wrap.appendChild(el('p', 'caption', spec.caption));
-    return wrap;
-  }
-
-  // ------------------------------------------------------------ 詰将棋
-  var TS = { index: 0, pos: null, left: 0, stack: [], done: false, sel: -1, dropType: -1, targets: {} };
-
-  function loadProblem(i) {
-    TS.index = (i + T.PROBLEMS.length) % T.PROBLEMS.length;
-    var p = T.PROBLEMS[TS.index];
-    TS.pos = S.fromSfen(p.sfen);
-    TS.left = p.moves;
-    TS.stack = [];
-    TS.done = false;
-    clear(tutorPane);
-    pushMsg({
-      tone: 'ok',
-      title: '第' + (TS.index + 1) + '問（' + p.moves + '手詰）',
-      lines: [
-        'あなたは先手です。' + p.moves + '手で相手の玉を詰ませてください。',
-        '王手の連続で、逃げ道をなくすのがコツです。'
-      ]
-    });
-    $('tsumeLabel').textContent = '第' + (TS.index + 1) + '問 / 全' + T.PROBLEMS.length + '問（' + p.moves + '手詰）';
-    renderTsume();
-  }
-
-  function renderTsume() {
-    var check = S.inCheck(TS.pos, TS.pos.turn) ? TS.pos.kings[TS.pos.turn] : -1;
-    boardView.render(TS.pos, {
-      targets: TS.targets || {},
-      selected: TS.sel === undefined ? -1 : TS.sel,
-      checkSq: check,
-      hilite: [],
-      mover: (!TS.done && TS.pos.turn === S.SENTE) ? S.SENTE : -1,
-      bottom: S.SENTE
-    });
-    renderHand($('handGote'), TS.pos, S.GOTE, {});
-    renderHand($('handSente'), TS.pos, S.SENTE, {
-      selected: TS.dropType === undefined ? -1 : TS.dropType,
-      onPick: (!TS.done && TS.pos.turn === S.SENTE) ? tsumePickDrop : null
-    });
-    var s = $('status');
-    s.className = 'status';
-    s.textContent = TS.done ? '正解！ 次の問題へどうぞ。' : ('あと' + TS.left + '手で詰ませてください。');
-    if (TS.done) s.classList.add('think');
-    clear(kifuPane);
-    kifuPane.appendChild(el('p', null, '詰将棋モードです。「対局」タブに戻ると、指しかけの対局が続きから再開できます。'));
-  }
-
-  function tsumeClear() { TS.sel = -1; TS.dropType = -1; TS.targets = {}; }
-
-  function tsumePickDrop(type) {
-    if (TS.done) return;
-    if (TS.dropType === type) { tsumeClear(); renderTsume(); return; }
-    tsumeClear();
-    TS.dropType = type;
-    S.dropsOf(TS.pos, type).forEach(function (m) {
-      var to = S.mvTo(m);
-      (TS.targets[to] = TS.targets[to] || []).push(m);
-    });
-    renderTsume();
-  }
-
-  function onTsumeSquare(sq) {
-    if (TS.done || TS.pos.turn !== S.SENTE) return;
-    if (TS.targets && TS.targets[sq]) { tsumeChoose(TS.targets[sq]); return; }
-    var p = TS.pos.board[sq];
-    tsumeClear();
-    if (p !== S.EMPTY && S.ownerOf(p) === S.SENTE) {
-      TS.sel = sq;
-      S.movesFrom(TS.pos, sq).forEach(function (m) {
-        var to = S.mvTo(m);
-        (TS.targets[to] = TS.targets[to] || []).push(m);
-      });
-    }
-    renderTsume();
-  }
-
-  function tsumeChoose(moves) {
-    if (moves.length === 1) { tsumePlay(moves[0]); return; }
-    var prom = null, plain = null;
-    moves.forEach(function (m) { if (S.mvProm(m)) prom = m; else plain = m; });
-    if (prom === null || plain === null) { tsumePlay(moves[0]); return; }
-    $('promoteText').textContent = '成りますか？';
-    $('promoteModal').classList.remove('hidden');
-    $('promoteYes').onclick = function () { $('promoteModal').classList.add('hidden'); tsumePlay(prom); };
-    $('promoteNo').onclick = function () { $('promoteModal').classList.add('hidden'); tsumePlay(plain); };
-  }
-
-  function tsumePlay(m) {
-    var kanji = S.moveToKanji(TS.pos, m);
-    tsumeClear();
-    var undo = S.doMove(TS.pos, m);
-    TS.stack.push(undo);
-    click(340);
-
-    // 詰んだ？
-    if (S.legalMoves(TS.pos).length === 0 && S.inCheck(TS.pos, TS.pos.turn)) {
-      TS.done = true;
-      renderTsume();
-      pushMsg({ tone: 'great', title: '正解！', lines: [esc(kanji) + ' まで。お見事です。'] });
-      click(660);
-      return;
-    }
-    // 王手になっていない
-    if (!S.inCheck(TS.pos, TS.pos.turn)) {
-      S.undoMove(TS.pos, TS.stack.pop());
-      renderTsume();
-      pushMsg({ tone: 'warn', title: 'この手では詰みません', lines: [esc(kanji) + ' は王手になっていません。詰将棋は王手の連続で追いつめます。'] });
-      return;
-    }
-    // 王手だが、この後もう詰まない
-    var rest = TS.left - 1;
-    if (rest <= 0 || !stillMate(rest)) {
-      S.undoMove(TS.pos, TS.stack.pop());
-      renderTsume();
-      pushMsg({ tone: 'warn', title: '惜しい！', lines: [esc(kanji) + ' は王手ですが、これでは逃げられてしまいます。ほかの手を探しましょう。'] });
-      return;
-    }
-    // 相手の応手
-    var def = AI.think(TS.pos, { level: 2, noise: 0, useBook: false }).move;
-    var defKanji = S.moveToKanji(TS.pos, def);
-    TS.stack.push(S.doMove(TS.pos, def));
-    TS.left = rest - 1;
-    renderTsume();
-    pushMsg({ tone: 'ok', title: '相手の応手', lines: [esc(kanji) + ' に対して ' + esc(defKanji) + '。あと' + TS.left + '手です。'] });
-  }
-
-  /** 相手の手番になった局面から、残り n 手で詰むか */
-  function stillMate(n) {
-    var moves = S.legalMoves(TS.pos);
-    if (!moves.length) return true;
-    for (var i = 0; i < moves.length; i++) {
-      var u = S.doMove(TS.pos, moves[i]);
-      var ok = S.findMate(TS.pos, n - 1) !== null;
-      S.undoMove(TS.pos, u);
-      if (!ok) return false;
-    }
-    return true;
-  }
-
-  // ------------------------------------------------------------ 画面切り替え
-  var view = 'play';
-
-  function setView(v) {
-    view = v;
-    Array.prototype.forEach.call($('viewTabs').children, function (b) {
-      b.classList.toggle('on', b.dataset.view === v);
-    });
-    $('gameLayout').classList.toggle('hidden', v === 'lesson');
-    $('lessonLayout').classList.toggle('hidden', v !== 'lesson');
-    $('playControls').classList.toggle('hidden', v !== 'play');
-    $('tsumeControls').classList.toggle('hidden', v !== 'tsume');
-    if (v === 'lesson') renderLesson();
-    if (v === 'tsume') {
-      // 詰将棋は必ず先手（あなた）が下
-      boardView.flip = false;
-      renderBoardLabels(false);
-      tsumeClear();
-      loadProblem(TS.index);
-    }
-    if (v === 'play') {
-      applyOrientation();
-      clear(tutorPane);
-      render();
-      pushMsg({ tone: 'ok', title: '対局にもどりました', lines: ['続きからどうぞ。'] });
-    }
   }
 
   // ------------------------------------------------------------ 設定画面
@@ -1109,6 +849,7 @@
     if (checkEnd()) return;
     var notes = T.comment(G.pos, G.you === S.SENTE);
     if (notes.length > 1) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
+    refreshEval();
   }
 
   /**
@@ -1192,11 +933,90 @@
     );
   }
 
-  /** いま表示している画面を描き直す */
-  function refresh() {
-    if (view === 'tsume') renderTsume();
-    else if (view === 'play') render();
+  // ------------------------------------------------------------ サーバー解析
+  /**
+   * bridge.js のエンジンに局面を解析させる。
+   * 返り値: { bestmove, candidates, depth } または null（使えないとき）
+   * 使えない場合は呼び出し側が内蔵エンジンにフォールバックする。
+   */
+  function analyze(pos, opts) {
+    if (!bridge.url) return Promise.resolve(null);
+    opts = opts || {};
+    return fetch(bridge.url + '/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sfen: S.toSfen(pos), ms: opts.ms, multipv: opts.multipv })
+    }).then(function (r) {
+      if (!r.ok) return null;
+      return r.json();
+    }).then(function (d) {
+      return (d && !d.error && d.candidates) ? d : null;
+    }).catch(function () { return null; });
   }
+
+  /** 解析結果の1件を「手番側から見た点数」にそろえる */
+  function cpOf(cand) {
+    if (!cand) return null;
+    if (typeof cand.mate === 'number') {
+      // 詰みは大きな点数に置き換える（正なら手番側の勝ち）
+      return cand.mate > 0 ? 30000 - cand.mate : -30000 - cand.mate;
+    }
+    return (typeof cand.score === 'number') ? cand.score : null;
+  }
+
+  /** USIの指し手文字列を、この局面の指し手に変換 */
+  function usiToMove(pos, usi) {
+    if (!usi) return null;
+    var r = S.parseMoveText(pos, usi);
+    return r.move;
+  }
+
+  /**
+   * 講評用に「最善手との差」を求める。
+   * サーバーが使えれば、指す前の局面（最善手＋点数）と指した後の局面（点数）を
+   * 解析して差を取る。使えなければ内蔵エンジンに任せる（opts を空で返す）。
+   */
+  function reviewWithServer(before, move, gen) {
+    if (!bridge.url) return Promise.resolve({ ms: 400 });
+    var after = before.clone();
+    S.doMove(after, move);
+    return analyze(before, { ms: 500, multipv: 1 }).then(function (b) {
+      if (!b || gen !== G.gen) return null;
+      return analyze(after, { ms: 500, multipv: 1 }).then(function (a) {
+        if (!a || gen !== G.gen) return null;
+        var bestCp = cpOf(b.candidates[0]);
+        // 指した後の点数は相手番から見た値なので反転する
+        var afterCp = cpOf(a.candidates[0]);
+        if (bestCp === null || afterCp === null) return null;
+        return {
+          lossCp: bestCp - (-afterCp),
+          bestMove: usiToMove(before, b.bestmove),
+          note: 'やねうら王の判定（深さ' + Math.min(b.depth, a.depth) + '）'
+        };
+      });
+    }).then(function (r) { return r || { ms: 400 }; })
+      .catch(function () { return { ms: 400 }; });
+  }
+
+  /** サーバーに形勢を問い合わせ、返ってきたら棋譜タブを描き直す */
+  function refreshEval() {
+    if (!bridge.url || G.over) return;
+    var key = S.toSfen(G.pos), gen = G.gen;
+    analyze(G.pos, { ms: 400, multipv: 1 }).then(function (d) {
+      if (!d || gen !== G.gen || S.toSfen(G.pos) !== key) return;
+      var cp = cpOf(d.candidates[0]);
+      if (cp === null) return;
+      // 手番側から見た点数 → 先手から見た点数
+      evalCache = {
+        key: key, depth: d.depth, from: 'サーバー',
+        senteCp: (G.pos.turn === S.SENTE) ? cp : -cp
+      };
+      renderKifu();
+    });
+  }
+
+  /** 画面を描き直す */
+  function refresh() { render(); }
 
   function openSettings() {
     $('soundChk').checked = settings.sound;
@@ -1229,10 +1049,7 @@
     kifuPane = $('paneKifu');
     piecePane = $('panePieces');
 
-    boardView = new BoardView($('board'), function (sq) {
-      if (view === 'play') onSquare(sq);
-      else if (view === 'tsume') onTsumeSquare(sq);
-    });
+    boardView = new BoardView($('board'), onSquare);
 
     // 手合割・強さ
     var hs = $('handicapSel');
@@ -1251,9 +1068,6 @@
     applyOrientation();
 
     // イベント
-    $('viewTabs').addEventListener('click', function (e) {
-      if (e.target.dataset && e.target.dataset.view) setView(e.target.dataset.view);
-    });
     $('panelTabs').addEventListener('click', function (e) {
       var p = e.target.dataset && e.target.dataset.pane;
       if (!p) return;
@@ -1294,21 +1108,6 @@
     $('overNew').addEventListener('click', function () {
       $('overModal').classList.add('hidden');
       startNewGame();
-    });
-
-    $('tsumePrev').addEventListener('click', function () { loadProblem(TS.index - 1); });
-    $('tsumeNext').addEventListener('click', function () { loadProblem(TS.index + 1); });
-    $('tsumeReset').addEventListener('click', function () { loadProblem(TS.index); });
-    $('tsumeHint').addEventListener('click', function () {
-      pushMsg({ tone: 'ok', title: 'ヒント', lines: [esc(T.PROBLEMS[TS.index].hint)] });
-    });
-    $('tsumeAnswer').addEventListener('click', function () {
-      var p = T.PROBLEMS[TS.index];
-      var line = T.solveLine(S.fromSfen(p.sfen), p.moves);
-      pushMsg({
-        tone: 'ok', title: '答え（' + p.theme + '）',
-        lines: [esc(line.join('　')) + ' まで' + p.moves + '手詰。']
-      });
     });
 
     renderPieceGuide(piecePane);
