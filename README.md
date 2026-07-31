@@ -297,7 +297,7 @@ test/               ルールの自己テスト
 ## テスト
 
 ```bash
-node test/test-engine.js
+node test/test-rule.js
 ```
 
 ルールの検証です。駒の動き・成り・二歩・打ち歩詰め・ピン・undoの整合性などに加えて、

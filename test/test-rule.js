@@ -1,5 +1,5 @@
 /*
- * ルールエンジンの自己テスト。  node test/test-engine.js で実行。
+ * ルールの自己テスト。  node test/test-rule.js で実行。
  */
 var S = require('../js/rule.js');
 
