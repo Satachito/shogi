@@ -201,5 +201,24 @@ eq(perft(S.newGame('even'), 3), 25470, 'perft(3) = 25470');
 eq(perft(S.newGame('even'), 4), 719731, 'perft(4) = 719731');
 console.log('  perft(1..4) 所要 ' + (Date.now() - t0) + 'ms');
 
+section('タダで取られる駒の判定（hangingLoss）');
+(function () {
+  // 相掛かりの実戦形。2二角は2四飛に狙われているが、3二金と3一銀のひもが付いている。
+  // 飛車(1040)で角(950)を取っても損なので、警告してはいけない
+  var pos = S.fromSfen('ln1gk1snl/1r4gb1/p1pspp2p/3p2pR1/9/P5P2/1PPPPPN1P/1BGK1S3/LNS2G2L w P2p 24');
+  var sq22 = S.parseSqName('2二');
+  eq(S.hangingLoss(pos, sq22), 0, '守り駒があるので警告しない');
+  eq(S.toSfen(pos), 'ln1gk1snl/1r4gb1/p1pspp2p/3p2pR1/9/P5P2/1PPPPPN1P/1BGK1S3/LNS2G2L w P2p 24',
+    '判定しても盤面は変わらない');
+
+  // ひもの無い角を飛車がにらんでいる形は、まるまる損とみなす
+  var bare = S.fromSfen('4k4/7b1/9/7R1/9/9/9/9/4K4 w - 1');
+  eq(S.hangingLoss(bare, sq22), S.valueOf(bare.board[sq22]), 'ひもが無ければ丸損とみなす');
+
+  // 玉は「取られる駒」として数えない（王手は別で判定する）
+  var checked = S.fromSfen('lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1');
+  eq(S.hangingLoss(checked, S.parseSqName('5九')), 0, '玉は対象外');
+})();
+
 console.log('\n' + (fail === 0 ? '✓ 全 ' + pass + ' 件パス' : '✗ ' + fail + ' 件失敗 / ' + pass + ' 件パス'));
 process.exit(fail ? 1 : 0);

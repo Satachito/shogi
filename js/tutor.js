@@ -1,17 +1,15 @@
 /*
- * tutor.js — 「先生」役。
- *   - 指し手の講評、ヒント、形勢の言葉での説明
- *   - レッスンの教材データ
- *   - 詰将棋の問題（すべてエンジンで詰みを検証済み）
+ * tutor.js — 「先生」役。指し手の講評・ヒント・形勢を日本語にする。
+ *
+ * ここに思考ルーチンは無い。手の良し悪しと最善手は bridge.js 経由で
+ * やねうら王に聞き、このファイルはそれを言葉にするだけ。
+ * 盤の事実（詰み・王手・タダで取られる駒）だけは engine.js で自分で調べる。
  */
 ;(function (root, factory) {
-  var api = factory(
-    typeof require === 'function' ? require('./engine.js') : root.Shogi,
-    typeof require === 'function' ? require('./ai.js') : root.ShogiAI
-  );
+  var api = factory(typeof require === 'function' ? require('./engine.js') : root.Shogi);
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.ShogiTutor = api;
-})(typeof window !== 'undefined' ? window : globalThis, function (S, AI) {
+})(typeof window !== 'undefined' ? window : globalThis, function (S) {
   'use strict';
 
   // ====================================================== 駒の解説
@@ -75,9 +73,6 @@
   ];
 
   // ====================================================== レッスン
-  function scoreFor(owner, senteScore) {
-    return owner === S.SENTE ? senteScore : -senteScore;
-  }
 
   /** 形勢を言葉で */
   /**
@@ -177,18 +172,23 @@
     if (victim !== S.EMPTY) res.lines.push(S.nameOf(victim) + 'を取りました。');
     if (S.inCheck(after, after.turn)) res.lines.push('王手です。');
 
-    // 損得の計算（浅い探索）
-    var best = AI.think(pos, { level: 2, noise: 0, useBook: false, ms: opts.ms || 500 });
-    var bestScore = scoreFor(mover, best.score);
-    var actualScore = scoreFor(mover, AI.evalAfter(pos, move, opts.ms || 300));
-    var loss = bestScore - actualScore;
-
     // 指した駒がタダで取られないか
     var hangLoss = S.hangingLoss(after, to);
     if (hangLoss >= 300) {
       var moved = after.board[to];
       res.lines.push('注意：' + S.sqName(to) + 'の' + S.nameOf(moved) + 'は、このままだと取られてしまいます。');
     }
+
+    // 良し悪しはエンジンの点数（opts.lossCp）だけで決める。
+    // 無いときは、憶測でほめたり叱ったりしない
+    if (typeof opts.lossCp !== 'number') {
+      res.title = '指しました';
+      if (!res.lines.length) res.lines.push(describeMove(pos, move) + '手ですね。');
+      res.lines.push('手の良し悪しは bridge.js のエンジンが判定します（いまは繋がっていません）。');
+      return res;
+    }
+    var loss = opts.lossCp;
+    var bestMove = (typeof opts.bestMove === 'number') ? opts.bestMove : null;
 
     if (loss < 120) {
       res.tone = 'great';
@@ -204,9 +204,9 @@
       res.title = '大きな見落としかもしれません';
     }
 
-    if (loss >= 350 && best.move) {
-      res.lines.push('たとえば ' + S.moveToKanji(pos, best.move) + ' なら、' +
-        describeMove(pos, best.move) + '手でした。');
+    if (loss >= 350 && bestMove !== null) {
+      res.lines.push('たとえば ' + S.moveToKanji(pos, bestMove) + ' なら、' +
+        describeMove(pos, bestMove) + '手でした。');
     }
     if (loss < 120 && !res.lines.length) {
       res.lines.push(describeMove(pos, move) + '手ですね。');
@@ -246,9 +246,7 @@
 
     // 2. 王手されている
     if (S.inCheck(pos, me)) {
-      var esc = given !== null ? given
-        : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 500 }).move;
-      return { move: esc, title: 'まず王手を受けましょう', urgent: true,
+      return { move: given, title: 'まず王手を受けましょう', urgent: true,
         text: '「逃げる」「取る」「合駒する」の3つのどれかで王手を解消します。解消できないと負けです。' };
     }
 
@@ -263,30 +261,27 @@
     // 4. タダで取られそうな駒
     var hang = findHanging(pos, me, 400);
     if (hang.length) {
-      var save = given !== null ? given
-        : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 600 }).move;
-      return { move: save, title: '取られそうな駒があります',
+      return { move: given, title: '取られそうな駒があります',
         text: S.sqName(hang[0].sq) + 'の' + S.nameOf(hang[0].piece) +
           'が狙われています。逃げるか、ひも（守り）を付けるか、取り返せる形にしましょう。' };
     }
 
     // 5. ふつうの局面での有力手
-    var best = given !== null ? given
-      : AI.think(pos, { level: 2, noise: 0, useBook: false, ms: 700 }).move;
-    if (best === null) return { move: null, title: '指す手がありません', text: '詰んでいます。' };
+    if (given === null) {
+      return { move: null, title: 'ヒントを出せません',
+        text: 'bridge.js を起動すると、やねうら王がこの局面の最善手を教えてくれます。' };
+    }
     var title = pos.ply < 14 ? '序盤の組み立て' : '有力な手';
-    var text = describeMove(pos, best) + '手です。';
+    var text = describeMove(pos, given) + '手です。';
     if (pos.ply < 14) {
       text += ' 序盤は「大駒の道を開ける」「玉を囲う」「攻めの形を作る」の3つを意識しましょう。';
     }
-    return { move: best, title: title, text: text };
+    return { move: given, title: title, text: text };
   }
 
-  /** 局面についての短いコメント（手番の人へ） */
-  function comment(pos, youSente) {
+  /** 局面で気をつけることの短い一言（手番の人へ）。形勢は形勢バーが出す */
+  function comment(pos) {
     var lines = [];
-    var sc = AI.evaluate(pos);
-    lines.push(describeScore(sc, youSente));
     if (S.inCheck(pos, pos.turn)) {
       lines.push('王手がかかっています。受けなければいけません。');
     } else {

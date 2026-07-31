@@ -343,14 +343,16 @@
     // 形勢は「あなたから見て」表示する（後手を持つときは符号が逆になる）
     var youSente = (G.you === S.SENTE);
     var key = S.toSfen(G.pos);
-    var sc = (evalCache.key === key && evalCache.senteCp !== null)
-      ? evalCache.senteCp : AI.evaluate(G.pos);
+    var has = (evalCache.key === key && evalCache.senteCp !== null);
+    var sc = has ? evalCache.senteCp : 0;
     var mine = youSente ? sc : -sc;
-    var pct = Math.max(2, Math.min(98, 50 + mine / 40));
+    var pct = has ? Math.max(2, Math.min(98, 50 + mine / 40)) : 50;
     var wrap = el('div');
-    wrap.appendChild(el('p', null, T.describeScore(sc, youSente)));
-    if (evalCache.key === key && evalCache.from === 'サーバー') {
+    wrap.appendChild(el('p', null, has ? T.describeScore(sc, youSente) : '形勢を解析中です…'));
+    if (has) {
       wrap.appendChild(el('p', 'eval-src', 'やねうら王の評価（深さ' + evalCache.depth + '）'));
+    } else if (!bridge.url) {
+      wrap.appendChild(el('p', 'eval-src', 'bridge.js を起動すると形勢が出ます。'));
     }
     var bar = el('div', 'eval-bar');
     var fill = el('i');
@@ -531,6 +533,7 @@
     } else {
       pushMsg({ tone: 'ok', title: '待った', lines: ['手を戻しました。もう一度考えてみましょう。'] });
     }
+    refreshEval();
   }
 
   /**
@@ -832,6 +835,7 @@
       bridge.engine = (info && info.engine) || null;
       $('bridgeState').textContent = '● チャット連携ON（current-position.txt に自動保存）';
       pushBridge();
+      refreshEval();          // 連携が繋がった時点の形勢を出す
     }).catch(function () { /* 連携なしでも普通に使える */ });
   }
 
@@ -907,8 +911,8 @@
     extMsg('相手が ' + kanji + ' と指しました（' + source + '）', false);
     pushMsg({ tone: 'ok', who: '相手（外部AI）', title: kanji, lines: ['受け取り元: ' + esc(source)] });
     if (checkEnd()) return;
-    var notes = T.comment(G.pos, G.you === S.SENTE);
-    if (notes.length > 1) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.slice(1).map(esc) });
+    var notes = T.comment(G.pos);
+    if (notes.length) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.map(esc) });
 
     // 相手が指したら形勢を更新し、続けて「次の一手」を出す。
     // 解析は1回で済ませて、ヒントと形勢の両方にその結果を使う

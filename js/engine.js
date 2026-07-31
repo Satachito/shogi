@@ -526,10 +526,17 @@
   function hangingLoss(pos, sq) {
     var p = pos.board[sq];
     if (p === EMPTY) return 0;
+    if (typeOf(p) === K) return 0;              // 玉は「取られる駒」ではない（王手は別で見る）
     var me = ownerOf(p);
     var attacker = cheapestAttacker(pos, sq, 1 - me);
     if (attacker < 0) return 0;                 // 狙われていない
+
+    // ひも（守り駒）は、そのマスをいったん空にしてから数える。
+    // 自分の駒がいるマスへは動けないので、置いたままでは1枚も見つからない
+    pos.board[sq] = EMPTY;
     var defender = cheapestAttacker(pos, sq, me);
+    pos.board[sq] = p;
+
     if (defender < 0) return valueOf(p);        // 紐なし → まるまる損
     if (attacker < valueOf(p)) return valueOf(p) - attacker; // 安い駒で取られる
     return 0;
