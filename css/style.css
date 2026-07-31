@@ -541,3 +541,6 @@ select, input[type="password"], input[type="text"] {
 
 /* ヒントをそのまま指すボタン */
 .hint-play { margin-top: 8px; }
+
+/* エンジンの読み筋 */
+.pv { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7; }

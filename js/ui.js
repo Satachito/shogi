@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var S = window.Shogi, AI = window.ShogiAI, T = window.ShogiTutor, C = window.ShogiClaude;
+  var S = window.Shogi, PIECE_GUIDE = window.ShogiPieces, C = window.ShogiClaude;
 
   // ------------------------------------------------------------ 小道具
   function $(id) { return document.getElementById(id); }
@@ -172,6 +172,39 @@
     tutorPane.insertBefore(box, tutorPane.firstChild);
     while (tutorPane.children.length > 40) tutorPane.removeChild(tutorPane.lastChild);
     return box;
+  }
+
+  /** 先手から見た点数を「あなた／相手」の言葉にする */
+  function scoreWord(senteCp, youSente) {
+    var mine = youSente ? senteCp : -senteCp;
+    var a = Math.abs(mine);
+    var who = mine > 0 ? 'あなた' : '相手';
+    if (a < 250) return '形勢は互角です。';
+    if (a < 700) return who + 'が少し良さそうです。';
+    if (a < 1600) return who + 'が有利です。';
+    if (a < 4000) return who + 'が優勢です。';
+    return who + 'の勝勢です。';
+  }
+
+  /** エンジンの読み筋（USIの並び）を漢字の棋譜に直す */
+  function pvToKanji(pos, pv, max) {
+    if (!pv || !pv.length) return [];
+    var p = pos.clone(), out = [], prevTo = -1;
+    for (var i = 0; i < pv.length && out.length < (max || 8); i++) {
+      var r = S.parseMoveText(p, pv[i]);
+      if (r.move === null) break;
+      out.push(S.moveToKanji(p, r.move, prevTo));
+      prevTo = S.mvTo(r.move);
+      S.doMove(p, r.move);
+    }
+    return out;
+  }
+
+  /** 読み筋の行。無ければ null */
+  function pvLine(pos, pv, label) {
+    var ks = pvToKanji(pos, pv, 8);
+    if (ks.length < 2) return null;
+    return (label || '読み筋') + '：<span class="pv">' + esc(ks.join(' ')) + '</span>';
   }
 
   function esc(s) {
@@ -348,7 +381,7 @@
     var mine = youSente ? sc : -sc;
     var pct = has ? Math.max(2, Math.min(98, 50 + mine / 40)) : 50;
     var wrap = el('div');
-    wrap.appendChild(el('p', null, has ? T.describeScore(sc, youSente) : '形勢を解析中です…'));
+    wrap.appendChild(el('p', null, has ? scoreWord(sc, youSente) : '形勢を解析中です…'));
     if (has) {
       wrap.appendChild(el('p', 'eval-src', 'やねうら王の評価（深さ' + evalCache.depth + '）'));
     } else if (!bridge.url) {
@@ -453,17 +486,54 @@
     if (!settings.review) { soon(scheduleAi); return; }
 
     // 指す前の局面と、指した後の局面をサーバーに解析させて損得を出す
-    reviewWithServer(before, m, gen).then(function (opts) {
+    reviewWithServer(before, m, gen).then(function (d) {
       if (gen !== G.gen) return;
-      var rv = T.reviewMove(before, m, opts);
-      pushMsg({
-        tone: rv.tone, title: rv.title,
-        lines: ['<span class="mv">' + esc(rv.kanji) + '</span>']
-          .concat(rv.lines.map(esc))
-          .concat(opts.note ? ['<span class="eval-src">' + esc(opts.note) + '</span>'] : [])
-      });
+      pushReview(before, m, d);
       scheduleAi();
     });
+  }
+
+  /**
+   * 指した手の講評。良し悪しはエンジンの点差だけで決め、
+   * 「なぜそう言えるのか」はエンジンの読み筋をそのまま見せる。
+   */
+  function pushReview(before, move, d) {
+    var kanji = S.moveToKanji(before, move, -1, { origin: true });
+    var after = before.clone();
+    S.doMove(after, move);
+
+    var lines = ['<span class="mv">' + esc(kanji) + '</span>'];
+    var victim = before.board[S.mvTo(move)];
+    if (victim !== S.EMPTY) lines.push(esc(S.nameOf(victim) + 'を取りました。'));
+    if (S.inCheck(after, after.turn)) {
+      lines.push(S.isCheckmate(after) ? '<b>詰みです。お見事！</b>' : '王手です。');
+    }
+
+    if (!d) {
+      pushMsg({ tone: 'ok', title: '指しました', lines: lines.concat(
+        ['<span class="eval-src">手の良し悪しは bridge.js のエンジンが判定します（いまは繋がっていません）。</span>']) });
+      return;
+    }
+
+    var loss = Math.max(0, Math.round(d.lossCp));
+    var tone, title;
+    if (loss < 100) { tone = 'great'; title = '最善手です！'; }
+    else if (loss < 300) { tone = 'ok'; title = 'ほぼ最善です'; }
+    else if (loss < 800) { tone = 'warn'; title = 'もっと良い手がありました'; }
+    else { tone = 'bad'; title = '大きな見落としかもしれません'; }
+
+    if (loss >= 100 && d.bestMove !== null) {
+      lines.push('最善は <span class="mv">' +
+        esc(S.moveToKanji(before, d.bestMove, -1, { origin: true })) +
+        '</span> で、<b>' + loss + '点</b>の差でした。');
+      var pl = pvLine(before, d.bestPv, 'その読み筋');
+      if (pl) lines.push(pl);
+    } else if (loss < 100) {
+      var pl2 = pvLine(before, d.bestPv, 'この先の読み筋');
+      if (pl2) lines.push(pl2);
+    }
+    lines.push('<span class="eval-src">' + esc(engineLabel() + ' 深さ' + d.depth) + '</span>');
+    pushMsg({ tone: tone, title: title, lines: lines });
   }
 
   function aiTurn() {
@@ -562,50 +632,54 @@
    * 狙いのマスを盤に光らせる。auto は相手の手のあとに自動で出したとき。
    */
   function pushHint(d, auto) {
-    var given = d ? usiToMove(G.pos, d.bestmove) : null;
     var top = d && d.candidates && d.candidates[0];
-    var mateIn = (top && typeof top.mate === 'number' && top.mate > 0) ? top.mate : 0;
-    var h = T.hint(G.pos, { bestMove: given, mateIn: mateIn });
-    if (h.move !== null && h.move !== undefined) {
-      G.hilite = [S.mvTo(h.move)];
-      if (!S.mvIsDrop(h.move)) G.hilite.push(S.mvFrom(h.move));
+    var mv = d ? usiToMove(G.pos, d.bestmove) : null;
+
+    if (mv === null) {
+      pushMsg({ tone: 'warn', title: 'ヒントを出せません', lines: [
+        'bridge.js を起動すると、やねうら王がこの局面の最善手と読み筋を教えてくれます。'] });
+      return;
     }
 
-    var has = (h.move !== null && h.move !== undefined);
-    var lines = [esc(h.text)];
-    if (has) {
-      // 迷わないように、指し手そのものを見せる（駒・行き先・移動元まで）
-      lines.push('<b>この手です → <span class="mv">' +
-        esc(S.moveToKanji(G.pos, h.move, G.lastTo, { origin: true })) + '</span></b>' +
-        '（' + esc(S.moveToUsi(h.move)) + '・盤の青いマス）');
-    }
-    if (given !== null && d) {
-      lines.push('<span class="eval-src">' + esc(engineLabel() + 'が ' + d.depth +
-        '手先まで読んだ最善手です（' + hintMs() + 'ms・深さ無制限）。') + '</span>');
-    } else {
-      lines.push('<span class="eval-src">内蔵エンジンの手です（' +
-        'bridge.js を起動すると、もっと強い手を教えられます）。</span>');
-    }
+    G.hilite = [S.mvTo(mv)];
+    if (!S.mvIsDrop(mv)) G.hilite.push(S.mvFrom(mv));
 
-    var box = pushMsg({
-      tone: h.urgent ? 'warn' : 'ok',
-      title: auto ? '次の一手 — ' + h.title : h.title,
-      lines: lines
-    });
+    var mate = (top && typeof top.mate === 'number') ? top.mate : null;
+    var cp = cpOf(top);
+    var title = auto ? '次の一手' : 'ヒント';
+    var tone = 'ok';
+    if (mate !== null && mate > 0) { title = mate + '手で詰みます！'; tone = 'warn'; }
+    else if (mate !== null && mate < 0) { title = '詰まされそうです'; tone = 'bad'; }
+    else if (S.inCheck(G.pos, G.pos.turn)) { title = title + '（王手を受ける）'; tone = 'warn'; }
+
+    var lines = ['<b>この手です → <span class="mv">' +
+      esc(S.moveToKanji(G.pos, mv, G.lastTo, { origin: true })) + '</span></b>' +
+      '（' + esc(S.moveToUsi(mv)) + '・盤の青いマス）'];
+
+    // 「なぜその手か」は、エンジンが読んだ手順をそのまま見せる
+    var pl = pvLine(G.pos, top && top.pv, 'この先の読み筋');
+    if (pl) lines.push(pl);
+    if (cp !== null && mate === null) {
+      var senteCp = (G.pos.turn === S.SENTE) ? cp : -cp;
+      lines.push('この手を指したあとの形勢：' + esc(scoreWord(senteCp, G.you === S.SENTE)) +
+        '（' + (senteCp > 0 ? '+' : '') + senteCp + '）');
+    }
+    lines.push('<span class="eval-src">' + esc(engineLabel() + ' 深さ' + d.depth +
+      '・' + hintMs() + 'ms（深さ無制限）') + '</span>');
+
+    var box = pushMsg({ tone: tone, title: title, lines: lines });
 
     // ヒント通りに指すためのボタン。押し間違いで別の手を指してしまうのを防ぐ
-    if (has) {
-      var key = S.toSfen(G.pos), gen = G.gen, mv = h.move;
-      var btn = el('button', 'btn primary hint-play', 'この手を指す');
-      btn.type = 'button';
-      btn.onclick = function () {
-        if (gen !== G.gen || G.over || G.busy) return;
-        if (S.toSfen(G.pos) !== key) { btn.disabled = true; btn.textContent = '局面が変わりました'; return; }
-        btn.disabled = true;
-        playMove(mv);
-      };
-      box.appendChild(btn);
-    }
+    var key = S.toSfen(G.pos), gen = G.gen;
+    var btn = el('button', 'btn primary hint-play', 'この手を指す');
+    btn.type = 'button';
+    btn.onclick = function () {
+      if (gen !== G.gen || G.over || G.busy) return;
+      if (S.toSfen(G.pos) !== key) { btn.disabled = true; btn.textContent = '局面が変わりました'; return; }
+      btn.disabled = true;
+      playMove(mv);
+    };
+    box.appendChild(btn);
     render();
   }
 
@@ -671,7 +745,7 @@
   function renderPieceGuide(container) {
     clear(container);
     var list = el('div', 'piece-list');
-    T.PIECE_GUIDE.forEach(function (g, i) {
+    PIECE_GUIDE.forEach(function (g, i) {
       var b = el('button', i === guideState.index ? 'on' : null, S.GLYPH[g.type]);
       b.addEventListener('click', function () {
         guideState.index = i; guideState.prom = false; renderPieceGuide(container);
@@ -680,7 +754,7 @@
     });
     container.appendChild(list);
 
-    var g = T.PIECE_GUIDE[guideState.index];
+    var g = PIECE_GUIDE[guideState.index];
     var canProm = S.CAN_PROMOTE[g.type];
     var body = el('div', 'guide');
     body.appendChild(el('h3', null, g.title + (guideState.prom ? '（成り）' : '')));
@@ -839,12 +913,18 @@
     }).catch(function () { /* 連携なしでも普通に使える */ });
   }
 
+  var lastPush = '';
   function pushBridge() {
     if (!bridge.url) return;
+    var body = shareText();
+    // 同じ局面を二度送らない。送るとエンジンが同じ手を二度考えてしまう
+    // （指したあとの保存と、相手待ちの開始で、2回呼ばれる）
+    if (body === lastPush) return;
+    lastPush = body;
     fetch(bridge.url + '/position', {
       method: 'POST',
       headers: { 'content-type': 'text/plain;charset=utf-8' },
-      body: shareText()
+      body: body
     }).catch(function () {});
   }
 
@@ -911,9 +991,6 @@
     extMsg('相手が ' + kanji + ' と指しました（' + source + '）', false);
     pushMsg({ tone: 'ok', who: '相手（外部AI）', title: kanji, lines: ['受け取り元: ' + esc(source)] });
     if (checkEnd()) return;
-    var notes = T.comment(G.pos);
-    if (notes.length) pushMsg({ tone: 'warn', title: 'いまの局面', lines: notes.map(esc) });
-
     // 相手が指したら形勢を更新し、続けて「次の一手」を出す。
     // 解析は1回で済ませて、ヒントと形勢の両方にその結果を使う
     var wantHint = settings.autoHint;
@@ -1049,7 +1126,7 @@
    * 解析して差を取る。使えなければ内蔵エンジンに任せる（opts を空で返す）。
    */
   function reviewWithServer(before, move, gen) {
-    if (!bridge.url) return Promise.resolve({ ms: 400 });
+    if (!bridge.url) return Promise.resolve(null);
     var after = before.clone();
     S.doMove(after, move);
     return analyze(before, { ms: 500, multipv: 1 }).then(function (b) {
@@ -1063,11 +1140,12 @@
         return {
           lossCp: bestCp - (-afterCp),
           bestMove: usiToMove(before, b.bestmove),
-          note: 'やねうら王の判定（深さ' + Math.min(b.depth, a.depth) + '）'
+          bestPv: b.candidates[0].pv,
+          depth: Math.min(b.depth, a.depth)
         };
       });
-    }).then(function (r) { return r || { ms: 400 }; })
-      .catch(function () { return { ms: 400 }; });
+    }).then(function (r) { return r || null; })
+      .catch(function () { return null; });
   }
 
   /**

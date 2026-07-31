@@ -162,6 +162,8 @@ class UsiEngine {
     if (this.hasOption('FV_SCALE')) {
       this.send('setoption name FV_SCALE value ' + ENGINE_FV_SCALE);
     }
+    // 解析で読み筋を取りこぼさないよう、PVの出力間引きを切る
+    if (this.hasOption('PvInterval')) this.send('setoption name PvInterval value 0');
     this.send('isready');
     await this.waitFor((l) => l.trim() === 'readyok', 120000);
     this.send('usinewgame');
@@ -213,6 +215,8 @@ class UsiEngine {
       let maxDepth = 0;
       const collect = (line) => {
         if (!/^info /.test(line) || !/ pv /.test(line)) return null;
+        // 探索中の暫定値（fail high/low）は読み筋が途中で切れているので使わない
+        if (/\b(lowerbound|upperbound)\b/.test(line)) return null;
         const d = /\bdepth (\d+)/.exec(line);
         const k = /\bmultipv (\d+)/.exec(line);
         const cp = /\bscore cp (-?\d+)/.exec(line);
@@ -225,7 +229,7 @@ class UsiEngine {
           move: pv[1].trim().split(/\s+/)[0],
           score: cp ? Number(cp[1]) : null,
           mate: mate ? Number(mate[1]) : null,
-          pv: pv[1].trim().split(/\s+/).slice(0, 8),
+          pv: pv[1].trim().split(/\s+/).slice(0, 12),
           depth: d ? Number(d[1]) : 0
         };
         return null;                        // 待たずに集め続ける
@@ -267,12 +271,15 @@ function findEngine() {
 }
 
 /** 局面テキストがCOMの手番を示していれば、エンジンに指させる */
+let lastAskedSfen = null;
 function maybeEngineMove(text) {
   if (!engine || !engine.ready) return;
   if (!/^★ あなた（COM側/m.test(text)) return;
   const m = /^SFEN: (.+)$/m.exec(text);
   if (!m) return;
   const sfen = m[1].trim();
+  if (sfen === lastAskedSfen) return;      // 同じ局面を二度考えさせない
+  lastAskedSfen = sfen;
   engine.bestMove(sfen).then((mv) => {
     if (!mv) { console.log('  エンジンは投了を選びました'); return; }
     submitMove(mv, engine.name, sfen);
