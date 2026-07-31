@@ -1,7 +1,7 @@
 /*
  * ルールエンジンの自己テスト。  node test/test-engine.js で実行。
  */
-var S = require('../js/engine.js');
+var S = require('../js/rule.js');
 
 var pass = 0, fail = 0;
 function ok(cond, label) {

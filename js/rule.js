@@ -1,5 +1,5 @@
 /*
- * engine.js — 将棋のルールエンジン
+ * rule.js — 将棋のルールエンジン
  *
  * 盤面は 81 マスの Int8Array。index = row * 9 + col
  *   row 0 = 一段目（上＝後手陣）, row 8 = 九段目（下＝先手陣）

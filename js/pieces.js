@@ -2,7 +2,7 @@
  * pieces.js — 「駒の動き」パネルに出す駒の解説。ただのデータ。
  */
 ;(function (root, factory) {
-  var api = factory(typeof require === 'function' ? require('./engine.js') : root.Shogi);
+  var api = factory(typeof require === 'function' ? require('./rule.js') : root.Shogi);
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.ShogiPieces = api;
 })(typeof window !== 'undefined' ? window : globalThis, function (S) {

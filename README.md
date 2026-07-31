@@ -279,12 +279,12 @@ cp eval/nn.bin <実行ファイルと同じ場所>/eval/nn.bin
 ```
 index.html          画面
 css/style.css       見た目
-js/engine.js        将棋のルール（盤・手生成・詰み判定・SFEN）
+js/rule.js          将棋のルール（盤・手生成・詰み判定・SFEN）
 js/pieces.js        「駒の動き」パネルの解説データ
-js/claude.js        Claude API 連携（任意）
+js/AI.js            Claude API 連携（任意）
 js/ui.js            画面の組み立てと操作
 bridge.js           チャット連携用のローカルサーバー（任意・Node.js）
-test/               エンジンとAIの自己テスト
+test/               ルールの自己テスト
 ```
 
 `bridge.js` を動かすと `current-position.txt`（いまの局面）が作られます。
